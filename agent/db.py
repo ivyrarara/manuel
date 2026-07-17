@@ -53,6 +53,7 @@ create table if not exists blog_posts (
 create table if not exists preferences (
     id         integer primary key autoincrement,
     text       text not null unique,
+    status     text not null default 'active',  -- pending / active / rejected
     active     integer not null default 1,
     created_at text not null
 );
@@ -135,6 +136,9 @@ def _ensure_columns(conn):
         "insights": [
             ("depth", "integer"),
         ],
+        "preferences": [
+            ("status", "text not null default 'active'"),
+        ],
     }
     for table, columns in wanted.items():
         exists = conn.execute(
@@ -155,7 +159,9 @@ def init():
         _ensure_columns(conn)
         for pref in SEED_PREFERENCES:
             conn.execute(
-                "insert or ignore into preferences (text, created_at) values (?, ?)", (pref, _now())
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'active', ?)",
+                (pref, _now()),
             )
         start = START_DATE or date.today().isoformat()
         conn.execute("insert or ignore into meta (key, value) values ('start_date', ?)", (start,))
@@ -253,21 +259,65 @@ def learnings_since(days: int) -> list[sqlite3.Row]:
 # ---------- 선호 ----------
 
 def preferences() -> list[str]:
+    """마늘이 실제로 지키는 요구사항. 승인된 것만입니다.
+
+    승인 전(pending)인 것은 여기 안 들어옵니다. 그래서 프롬프트 버전도
+    사용자가 승인하는 순간에만 바뀝니다 — 지나가는 말이 데이터를 오염시키지 않습니다.
+    """
     with connect() as conn:
-        rows = conn.execute("select text from preferences where active = 1 order by id").fetchall()
+        rows = conn.execute(
+            "select text from preferences where active = 1 and status = 'active' order by id"
+        ).fetchall()
     return [r["text"] for r in rows]
 
 
-def add_preferences(texts: list[str]) -> list[str]:
-    added = []
+def seed_preferences(texts: list[str]):
+    """초기 요구사항. 사용자가 직접 정한 것이므로 바로 승인 상태로 넣습니다."""
+    with connect() as conn:
+        for t in texts:
+            conn.execute(
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'active', ?)",
+                (t, _now()),
+            )
+
+
+def propose_preferences(texts: list[str]) -> list[sqlite3.Row]:
+    """마늘이 감지한 요구사항을 **승인 대기**로 넣습니다.
+
+    바로 적용하지 않습니다. 지나가는 말이 영구 정책이 되면 안 되고,
+    그 순간 프롬프트 버전까지 바뀌어 100일치 데이터 해석이 오염됩니다.
+    한 번 거절한 것은 다시 묻지 않습니다.
+    """
+    proposed = []
     with connect() as conn:
         for t in texts:
             cur = conn.execute(
-                "insert or ignore into preferences (text, created_at) values (?, ?)", (t, _now())
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'pending', ?)",
+                (t, _now()),
             )
             if cur.rowcount:
-                added.append(t)
-    return added
+                row = conn.execute(
+                    "select id, text from preferences where text = ?", (t,)
+                ).fetchone()
+                proposed.append(row)
+    return proposed
+
+
+def resolve_preference(pref_id: int, approved: bool) -> str | None:
+    """승인 또는 거절. 요구사항 문구를 반환."""
+    with connect() as conn:
+        row = conn.execute(
+            "select text from preferences where id = ? and status = 'pending'", (pref_id,)
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "update preferences set status = ? where id = ?",
+            ("active" if approved else "rejected", pref_id),
+        )
+        return row["text"]
 
 
 def forget_preference(pref_id: int) -> bool:
@@ -279,7 +329,7 @@ def forget_preference(pref_id: int) -> bool:
 def list_preferences() -> list[sqlite3.Row]:
     with connect() as conn:
         return conn.execute(
-            "select id, text from preferences where active = 1 order by id"
+            "select id, text from preferences where active = 1 and status = 'active' order by id"
         ).fetchall()
 
 

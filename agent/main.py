@@ -62,6 +62,14 @@ def feedback_keyboard(checkin_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def preference_keyboard(pref_id: int) -> InlineKeyboardMarkup:
+    """승인 없이는 규칙이 되지 않습니다. 탭 한 번이면 충분하니 마찰도 거의 없습니다."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🧠 기억해", callback_data=f"pref:{pref_id}:y"),
+        InlineKeyboardButton("🙅 아니", callback_data=f"pref:{pref_id}:n"),
+    ]])
+
+
 def silence_keyboard(checkin_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🗣️ 말했어야 함", callback_data=f"sr:{checkin_id}:should_have_spoken"),
@@ -93,7 +101,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-URL_RE = re.compile(r"https?://[^\s]+")
+# 주소에 쓸 수 있는 문자만 인정합니다.
+# `[^\s]+` 로 잡으면 "brunch.co.kr/@ivyra/301이게" 처럼 띄어쓰기 없이 붙여 쓴
+# 한글까지 주소로 삼아버립니다. 그러면 없는 주소를 부르게 되고, 조용히 실패합니다.
+URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+
+
+def _extract_url(text: str) -> str | None:
+    urls = URL_RE.findall(text)
+    if not urls:
+        return None
+    # 문장 끝에 붙은 마침표·쉼표·괄호는 주소가 아닙니다.
+    return urls[0].rstrip(".,;:!?)'\"")
 
 
 async def _with_link_content(text: str) -> str:
@@ -102,12 +121,13 @@ async def _with_link_content(text: str) -> str:
     마늘은 링크를 클릭할 수 없습니다. 붙여넣은 글을 읽어주길 기대하는 건
     자연스러운데, 그걸 못 하면 "접근할 수 없어요"만 반복하게 됩니다.
     """
-    urls = URL_RE.findall(text)
-    if not urls:
+    url = _extract_url(text)
+    if not url:
         return text
 
-    article = await blog.fetch_url_text(urls[0])
+    article = await blog.fetch_url_text(url)
     if not article or len(article) < 100:
+        log.warning("링크를 읽지 못했어요: %s", url)
         return text
     return f"{text}\n\n[아래는 사용자가 보낸 링크의 내용입니다]\n{article[:10000]}"
 
@@ -130,9 +150,31 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
 
-    if result["learned"]:
-        learned = "\n".join(f"· {p}" for p in result["learned"])
-        await update.message.reply_text(f"🧠 기억했어요:\n{learned}\n\n/forget 으로 지울 수 있어요.")
+    # 지나가는 말이 영구 규칙이 되지 않도록, 승인을 받고 나서 적용합니다.
+    for pref in result["proposed"]:
+        await update.message.reply_text(
+            f"🧠 이걸 규칙으로 기억할까요?\n\n“{pref['text']}”",
+            reply_markup=preference_keyboard(pref["id"]),
+        )
+
+
+@owner_only
+async def on_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """요구사항 승인/거절."""
+    query = update.callback_query
+    _, raw_id, code = query.data.split(":", 2)
+    approved = code == "y"
+
+    text = db.resolve_preference(int(raw_id), approved)
+    if text is None:
+        await query.answer("이미 처리했어요")
+        return
+
+    await query.answer("기억할게요" if approved else "잊을게요")
+    label = "🧠 기억함 — 이제 규칙이에요" if approved else "🙅 안 기억함"
+    await query.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="noop")]])
+    )
 
 
 @owner_only
@@ -583,6 +625,7 @@ def main():
     app.add_handler(CommandHandler("reclassify", reclassify))
     app.add_handler(CommandHandler("checkin", checkin_now))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(on_preference, pattern=r"^pref:"))
     app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^(fb|sr):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
