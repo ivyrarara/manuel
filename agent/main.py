@@ -12,6 +12,7 @@ import re
 from datetime import time as dtime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import InvalidToken
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -27,6 +28,16 @@ from .config import (
 )
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
+
+# httpx는 모든 요청 URL을 INFO로 남깁니다. 그런데 텔레그램 API는 주소 안에 토큰을 넣습니다:
+#   POST https://api.telegram.org/bot<토큰>/getMe
+# 그래서 로그를 남에게 보여주는 순간 봇이 탈취됩니다. WARNING으로 올려서 막습니다.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+# 스케줄러가 잡 등록할 때마다 남기는 잡음도 줄입니다.
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+
 log = logging.getLogger("maneul")
 
 
@@ -373,6 +384,35 @@ async def send_post_insights(context: ContextTypes.DEFAULT_TYPE, post: dict):
         db.add_insights(mid, [{"text": m, "type": "learning"} for m in result["missed"]])
 
 
+@owner_only
+async def reclassify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """매거진 판별 기능이 생기기 전에 저장된 글들을 다시 분류합니다."""
+    posts = db.unclassified_posts()
+    if not posts:
+        await update.message.reply_text("분류할 글이 없어요.")
+        return
+
+    await update.message.reply_text(f"{len(posts)}개 글을 다시 분류할게요. 좀 걸려요...")
+    mag, personal, failed = [], [], []
+
+    for p in posts:
+        html = await blog.fetch_raw_html(p["link"])
+        if not html:
+            failed.append(p["title"])
+            continue
+        is_mag = blog._is_magazine_post(html)
+        db.set_post_magazine(p["guid"], is_mag)
+        (mag if is_mag else personal).append(p["title"])
+
+    lines = [f"🧄 매거진 글 {len(mag)}개 (성취로 셈)"]
+    lines += [f"  · {t}" for t in mag[:5]]
+    lines.append(f"\n📖 그 외 {len(personal)}개 (읽지만 성취 아님)")
+    lines += [f"  · {t}" for t in personal[:5]]
+    if failed:
+        lines.append(f"\n⚠️ 판별 실패 {len(failed)}개 — 성취로 세지 않아요")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def job_blog(context: ContextTypes.DEFAULT_TYPE):
     """체크인 전에 블로그를 먼저 읽어둡니다. 그래야 오늘 쓴 글이 판단에 반영돼요."""
     if not blog.enabled():
@@ -530,7 +570,6 @@ def main():
     db.init()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("actions", actions))
     app.add_handler(CommandHandler("done", done))
@@ -541,6 +580,7 @@ def main():
     app.add_handler(CommandHandler("pace", pace))
     app.add_handler(CommandHandler("blog", blog_check))
     app.add_handler(CommandHandler("github", github_check))
+    app.add_handler(CommandHandler("reclassify", reclassify))
     app.add_handler(CommandHandler("checkin", checkin_now))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^(fb|sr):"))
@@ -558,7 +598,17 @@ def main():
     jq.run_daily(job_monday_actions, time=dtime(hour, minute, tzinfo=TZ), days=(weekday,))
 
     log.info("마늘 시작. Day %s / %s", db.day_number(), TOTAL_DAYS)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except InvalidToken:
+        # 라이브러리가 던지는 예외 메시지에는 토큰 원문이 들어 있습니다.
+        # 그대로 두면 크래시할 때마다 로그에 토큰이 찍힙니다. 삼키고 안전한 안내만 남깁니다.
+        log.error(
+            "텔레그램 토큰이 거부됐어요. TELEGRAM_TOKEN을 확인하세요. "
+            "(형태: 숫자:문자열, 콜론은 하나. 기존 값을 지우고 새로 붙여넣었는지 확인)"
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

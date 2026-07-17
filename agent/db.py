@@ -110,15 +110,70 @@ def connect():
     return conn
 
 
+def _ensure_columns(conn):
+    """이미 만들어진 테이블에 빠진 컬럼을 채웁니다.
+
+    'create table if not exists'는 테이블이 있으면 그냥 넘어갑니다. 그래서 나중에
+    스키마에 컬럼을 추가해도, 이미 돌고 있던 DB에는 반영되지 않습니다.
+    그 상태로 insert하면 터집니다 — 그것도 새 데이터가 들어오는 순간에만 터지므로
+    한참 뒤에야 발견됩니다. 켤 때마다 확인해서 조용히 메꿉니다.
+    """
+    wanted = {
+        "blog_posts": [
+            ("content", "text"),
+            ("is_magazine", "integer not null default 1"),
+        ],
+        "checkins": [
+            ("trigger", "text"),
+            ("confidence", "integer"),
+            ("unspoken", "text"),
+            ("prompt_version", "text"),
+            ("raw_input", "text"),
+            ("feedback", "text"),
+            ("feedback_at", "text"),
+        ],
+        "insights": [
+            ("depth", "integer"),
+        ],
+    }
+    for table, columns in wanted.items():
+        exists = conn.execute(
+            "select name from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        have = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"alter table {table} add column {name} {decl}")
+                print(f"[migration] {table}.{name} 추가됨")
+
+
 def init():
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _ensure_columns(conn)
         for pref in SEED_PREFERENCES:
             conn.execute(
                 "insert or ignore into preferences (text, created_at) values (?, ?)", (pref, _now())
             )
         start = START_DATE or date.today().isoformat()
         conn.execute("insert or ignore into meta (key, value) values ('start_date', ?)", (start,))
+
+
+def unclassified_posts() -> list[sqlite3.Row]:
+    """매거진 판별 전에 저장된 글들. 다시 분류해야 합니다."""
+    with connect() as conn:
+        return conn.execute(
+            "select guid, title, link from blog_posts where link is not null and link != ''"
+        ).fetchall()
+
+
+def set_post_magazine(guid: str, is_magazine: bool):
+    with connect() as conn:
+        conn.execute(
+            "update blog_posts set is_magazine = ? where guid = ?", (int(is_magazine), guid)
+        )
 
 
 def day_number() -> int:
