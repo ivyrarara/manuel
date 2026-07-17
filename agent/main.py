@@ -8,6 +8,7 @@
 실행: python -m agent.main
 """
 import logging
+import re
 from datetime import time as dtime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -81,6 +82,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+URL_RE = re.compile(r"https?://[^\s]+")
+
+
+async def _with_link_content(text: str) -> str:
+    """메시지에 링크가 있으면 읽어서 함께 넘깁니다.
+
+    마늘은 링크를 클릭할 수 없습니다. 붙여넣은 글을 읽어주길 기대하는 건
+    자연스러운데, 그걸 못 하면 "접근할 수 없어요"만 반복하게 됩니다.
+    """
+    urls = URL_RE.findall(text)
+    if not urls:
+        return text
+
+    article = await blog.fetch_url_text(urls[0])
+    if not article or len(article) < 100:
+        return text
+    return f"{text}\n\n[아래는 사용자가 보낸 링크의 내용입니다]\n{article[:10000]}"
+
+
 @owner_only
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -90,6 +110,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=OWNER_CHAT_ID, action=ChatAction.TYPING)
 
     try:
+        text = await _with_link_content(text)
         result = await brain.respond_to(text)
     except Exception:
         log.exception("응답 생성 실패")
@@ -267,14 +288,22 @@ async def blog_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"✅ 연결됐어요. 글 {result['total']}개가 보여요."]
     if result.get("first_run"):
-        lines.append(f"\n기존 글 {len(result['new'])}개는 성취로 세지 않았어요.")
-        lines.append("과거 글을 오늘 성취로 넣으면 페이스 차트가 거짓말이 되니까요.")
-        lines.append("지금부터 올리는 글이 6단 성취로 잡혀요.")
-    elif result["recorded"]:
-        lines.append("\n새 글을 6단 성취로 기록했어요:")
-        lines += [f"🧄 {p['title']}" for p in result["recorded"]]
+        mag = sum(1 for p in result["new"] if p["is_magazine"])
+        lines.append(f"\n분류: 매거진 글 {mag}개 / 그 외 {len(result['new']) - mag}개")
+        lines.append("(기존 글은 성취로 세지 않았어요 — 과거 글을 오늘 성취로 넣으면")
+        lines.append("페이스 차트가 1일차부터 거짓말이 되니까요.)")
+        lines.append("\n지금부터 매거진에 올리는 글이 6단 성취로 잡혀요.")
     else:
-        lines.append("\n새 글은 없어요.")
+        mag = [p for p in result["new"] if p["is_magazine"]]
+        personal = [p for p in result["new"] if not p["is_magazine"]]
+        if mag:
+            lines.append("\n매거진 글 — 6단 성취로 기록했어요:")
+            lines += [f"🧄 {p['title']}" for p in mag]
+        if personal:
+            lines.append("\n매거진 밖 글 — 읽었지만 성취로 세지 않았어요:")
+            lines += [f"📖 {p['title']}" for p in personal]
+        if not result["new"]:
+            lines.append("\n새 글은 없어요.")
     await update.message.reply_text("\n".join(lines))
 
     for post in result["recorded"][:1]:
@@ -435,8 +464,23 @@ async def job_checkin(context: ContextTypes.DEFAULT_TYPE):
             "말 검" if decision["speak"] else "침묵",
             decision["trigger"], decision["confidence"], decision["reason"],
         )
-    except Exception:
+    except Exception as e:
+        # 침묵이 기본값인 에이전트는 죽어도 티가 나지 않습니다.
+        # 고장난 마늘과 침묵을 선택한 마늘이 똑같아 보이면 100일이 통째로 날아갑니다.
+        # 그래서 체크인이 실패하면 반드시 알립니다.
         log.exception("체크인 실패")
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=(
+                    "⚠️ 오늘 체크인이 실패했어요. 침묵이 아니라 고장이에요.\n\n"
+                    f"{type(e).__name__}: {str(e)[:200]}\n\n"
+                    "크레딧이 떨어졌거나(console.anthropic.com → Billing), "
+                    "일시적인 오류일 수 있어요. /checkin 으로 다시 시도해보세요."
+                ),
+            )
+        except Exception:
+            log.exception("실패 알림조차 보내지 못함")
 
 
 async def job_sunday_review(context: ContextTypes.DEFAULT_TYPE):

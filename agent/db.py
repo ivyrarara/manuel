@@ -46,6 +46,7 @@ create table if not exists blog_posts (
     link       text,
     published  text,
     content    text,              -- 글 원문. 분석 프롬프트를 고쳐도 옛 글에 다시 돌릴 수 있게.
+    is_magazine integer not null default 1,  -- 성취로 세는 매거진 글인가
     created_at text not null
 );
 
@@ -462,7 +463,8 @@ def blog_post_exists(guid: str) -> bool:
         ).fetchone() is not None
 
 
-def add_blog_post(guid: str, title: str, link: str, published: str, content: str = "") -> bool:
+def add_blog_post(guid: str, title: str, link: str, published: str,
+                  content: str = "", is_magazine: bool = True) -> bool:
     """새 글이면 True. 이미 있으면 False.
 
     content는 글 원문입니다. 분석 결과만 저장하고 원문을 버리면,
@@ -470,11 +472,22 @@ def add_blog_post(guid: str, title: str, link: str, published: str, content: str
     """
     with connect() as conn:
         cur = conn.execute(
-            "insert or ignore into blog_posts (guid, title, link, published, content, created_at) "
-            "values (?, ?, ?, ?, ?, ?)",
-            (guid, title, link, published, content, _now()),
+            "insert or ignore into blog_posts "
+            "(guid, title, link, published, content, is_magazine, created_at) "
+            "values (?, ?, ?, ?, ?, ?, ?)",
+            (guid, title, link, published, content, int(is_magazine), _now()),
         )
         return cur.rowcount > 0
+
+
+def personal_posts_since(days: int, limit: int = 3) -> list[sqlite3.Row]:
+    """매거진 밖의 글 — 일상과 기분. 성취는 아니지만 마늘이 알아야 할 맥락입니다."""
+    with connect() as conn:
+        return conn.execute(
+            "select title, content, created_at from blog_posts "
+            "where is_magazine = 0 and created_at >= ? order by created_at desc limit ?",
+            (_cutoff(days), limit),
+        ).fetchall()
 
 
 def blog_post_count() -> int:

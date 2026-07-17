@@ -4,6 +4,7 @@
 학습이란 결국 이 조립 재료가 DB에서 늘어나는 것입니다.
 """
 import json
+import re
 
 from anthropic import AsyncAnthropic
 
@@ -72,19 +73,49 @@ def build_system_prompt() -> str:
 - reply는 텔레그램으로 전송됩니다. 마크다운 표는 쓰지 마세요."""
 
 
+def extract_json(raw: str) -> dict | None:
+    """텍스트 어디에 있든 JSON 객체를 찾아냅니다.
+
+    모델이 형식을 항상 지키지는 않습니다. 답변을 먼저 쓰고 JSON을 뒤에 붙이거나,
+    코드블록으로 감싸거나, 설명을 앞에 답니다. 앞부분만 잘라내는 방식으로는
+    이걸 못 잡고, 그러면 JSON 원문이 그대로 사용자에게 노출됩니다.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    candidates = []
+    text = raw.strip()
+
+    # 1) 통째로 JSON인 경우
+    candidates.append(text)
+
+    # 2) 코드블록 안에 있는 경우 (앞뒤에 다른 텍스트가 있어도 찾아냄)
+    for m in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.S | re.I):
+        candidates.append(m.group(1))
+
+    # 3) 중괄호로 둘러싸인 가장 큰 덩어리
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+
+    for c in candidates:
+        try:
+            parsed = json.loads(c.strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
 def parse_json_response(raw: str) -> dict:
     """모델 응답에서 JSON을 뽑아냄. 실패해도 답변만은 살림."""
-    cleaned = raw.strip()
-    for fence in ("```json", "```"):
-        if cleaned.startswith(fence):
-            cleaned = cleaned[len(fence):]
-    if cleaned.endswith("```"):
-        cleaned = cleaned[:-3]
+    parsed = extract_json(raw)
 
-    try:
-        parsed = json.loads(cleaned.strip())
-    except json.JSONDecodeError:
-        return {"reply": cleaned.strip(), "insights": [], "new_preferences": []}
+    if parsed is None:
+        # JSON을 못 찾음 → 텍스트를 그대로 답변으로. 다만 코드블록 흔적은 지웁니다.
+        cleaned = re.sub(r"```(?:json)?\s*.*?```", "", raw, flags=re.S | re.I).strip()
+        return {"reply": cleaned or raw.strip(), "insights": [], "new_preferences": []}
 
     insights = []
     for item in parsed.get("insights") or []:
@@ -103,7 +134,7 @@ def parse_json_response(raw: str) -> dict:
         insights.append(entry)
 
     return {
-        "reply": parsed.get("reply") or cleaned.strip(),
+        "reply": parsed.get("reply") or "",
         "insights": insights,
         "new_preferences": [p for p in (parsed.get("new_preferences") or []) if isinstance(p, str) and p.strip()],
     }

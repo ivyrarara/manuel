@@ -120,6 +120,13 @@ def _context_block() -> str:
     else:
         lines.append("- 최근 2주 GitHub 활동: 없음")
 
+    personal = db.personal_posts_since(14)
+    if personal:
+        lines.append("- 최근 2주 매거진 밖 글 (일상·기분. 성취는 아니지만 상태를 보여주는 것):")
+        for p in personal:
+            excerpt = (p["content"] or "").strip()[:120]
+            lines.append(f"    · [{p['created_at'][:10]}] {p['title']}: {excerpt}...")
+
     recent_ach = db.achievements_since(PACE_WINDOW_WEEKS * 7)
     if recent_ach:
         lines.append("- 최근 성취 내역:")
@@ -201,10 +208,8 @@ async def decide() -> dict:
 
     raw = await brain.call([{"role": "user", "content": prompt}], system=system, max_tokens=800)
 
-    try:
-        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        result = json.loads(cleaned)
-    except json.JSONDecodeError:
+    result = brain.extract_json(raw)
+    if result is None:
         # 판단을 파싱 못 하면 침묵. 애매할 때 침묵이 안전한 기본값.
         # 파싱 실패해도 raw는 남깁니다 — 나중에 왜 깨졌는지 봐야 하니까.
         return {
