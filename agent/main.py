@@ -9,6 +9,7 @@
 """
 import logging
 import re
+from collections import deque
 from datetime import time as dtime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -152,6 +153,50 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
 
     # 지나가는 말이 영구 규칙이 되지 않도록, 승인을 받고 나서 적용합니다.
+    for pref in result["proposed"]:
+        await update.message.reply_text(
+            f"🧠 이걸 규칙으로 기억할까요?\n\n“{pref['text']}”",
+            reply_markup=preference_keyboard(pref["id"]),
+        )
+
+
+# 앨범(여러 장 한 번에 전송)이면 텔레그램이 사진마다 업데이트를 따로 보냅니다.
+# 같은 media_group_id의 두 번째 장부터는 무시해서 첫 장만 봅니다.
+_recent_media_groups: deque = deque(maxlen=50)
+
+
+def _first_in_media_group(update: Update) -> bool:
+    mgid = update.message.media_group_id
+    if not mgid:
+        return True
+    if mgid in _recent_media_groups:
+        return False
+    _recent_media_groups.append(mgid)
+    return True
+
+
+@owner_only
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _first_in_media_group(update):
+        return
+
+    caption = (update.message.caption or "").strip()
+    photo = update.message.photo[-1]  # 화질별로 여러 장 오는데, 제일 큰 것 하나만
+
+    await context.bot.send_chat_action(chat_id=OWNER_CHAT_ID, action=ChatAction.TYPING)
+
+    try:
+        tg_file = await context.bot.get_file(photo.file_id)
+        image_bytes = bytes(await tg_file.download_as_bytearray())
+        # 텔레그램은 "사진"으로 보낸 이미지를 항상 JPEG로 재인코딩해서 줍니다.
+        result = await brain.respond_to_photo(image_bytes, "image/jpeg", caption)
+    except Exception:
+        log.exception("사진 응답 생성 실패")
+        await update.message.reply_text("사진을 보는 데 실패했어요. 잠시 후 다시 시도해주세요.")
+        return
+
+    await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
+
     for pref in result["proposed"]:
         await update.message.reply_text(
             f"🧠 이걸 규칙으로 기억할까요?\n\n“{pref['text']}”",
@@ -629,6 +674,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_preference, pattern=r"^pref:"))
     app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^(fb|sr):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
 
     jq = app.job_queue
     jq.run_daily(job_blog, time=dtime(BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, tzinfo=TZ))
