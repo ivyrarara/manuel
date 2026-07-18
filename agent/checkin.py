@@ -119,11 +119,11 @@ def _context_block() -> str:
 
     memos = db.list_memos()
     if memos:
-        lines.append(f"- 완료 안 된 메모 {len(memos)}개 (오래 방치된 건 그 자체로 신호일 수 있음):")
+        lines.append(f"- 완료 안 된 메모 {len(memos)}개 (2주 이상 방치된 건 그 자체로 신호일 수 있음):")
         for m in memos:
             age = db.days_since(m["created_at"])
             tag_str = f" [{', '.join(db.memo_tags(m['tags']))}]" if m["tags"] else ""
-            stale = " ← 오래 방치됨" if age >= 7 else ""
+            stale = " ← 2주 넘게 방치됨" if age >= 14 else ""
             lines.append(f"    · {m['text']}{tag_str} ({age}일째 미완료{stale})")
 
     weeks = db.weekly_depth(PACE_WINDOW_WEEKS)
