@@ -290,25 +290,53 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("잊었어요." if ok else "그 번호의 요구사항을 찾지 못했어요.")
 
 
+def _parse_memo_args(args: list[str]) -> tuple[list[str], str]:
+    """`#태그 #태그2 내용...` 형태를 파싱. 태그 없이 내용만 써도 됩니다."""
+    tags = []
+    i = 0
+    while i < len(args) and args[i].startswith("#") and len(args[i]) > 1:
+        tags.append(args[i][1:])
+        i += 1
+    return tags, " ".join(args[i:]).strip()
+
+
+def _format_memo_tags(tags: str | None) -> str:
+    parsed = db.memo_tags(tags)
+    return f" [{', '.join(parsed)}]" if parsed else ""
+
+
 @owner_only
 async def memo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip()
+    tags, text = _parse_memo_args(context.args)
     if not text:
-        await update.message.reply_text("사용법: /memo <내용>")
+        await update.message.reply_text("사용법: /memo [#태그 ...] <내용>")
         return
-    db.add_memo(text)
-    await update.message.reply_text("📌 메모했어요.")
+    db.add_memo(text, tags)
+    tag_str = f" [{', '.join(tags)}]" if tags else ""
+    await update.message.reply_text(f"📌 메모했어요.{tag_str}")
 
 
 @owner_only
 async def memos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = db.list_memos()
+    tag = context.args[0].lstrip("#") if context.args else None
+    rows = db.list_memos(tag)
     if not rows:
-        await update.message.reply_text("아직 저장된 메모가 없어요. /memo <내용> 으로 남겨보세요.")
+        msg = f"'{tag}' 태그의 메모가 없어요." if tag else "아직 저장된 메모가 없어요. /memo <내용> 으로 남겨보세요."
+        await update.message.reply_text(msg)
         return
-    lines = ["저장된 메모:", ""]
-    lines += [f"{r['id']}. {r['text']} ({r['created_at'][:10]})" for r in rows]
+    lines = [f"'{tag}' 태그 메모:" if tag else "저장된 메모:", ""]
+    lines += [f"{r['id']}. {r['text']}{_format_memo_tags(r['tags'])} ({r['created_at'][:10]})" for r in rows]
+    lines += ["", "완료 처리: /memo_done <번호>"]
     await update.message.reply_text("\n".join(lines))
+
+
+@owner_only
+async def memo_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("사용법: /memo_done <번호>  (번호는 /memos 에서 확인)")
+        return
+    ok = db.complete_memo(int(context.args[0]))
+    await update.message.reply_text("완료 처리했어요." if ok else "그 번호의 메모를 찾지 못했어요.")
 
 
 @owner_only
@@ -674,6 +702,7 @@ def main():
     app.add_handler(CommandHandler("forget", forget))
     app.add_handler(CommandHandler("memo", memo))
     app.add_handler(CommandHandler("memos", memos))
+    app.add_handler(CommandHandler("memo_done", memo_done))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("data", data))
     app.add_handler(CommandHandler("pace", pace))

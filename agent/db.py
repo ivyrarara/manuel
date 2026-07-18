@@ -62,6 +62,8 @@ create table if not exists preferences (
 create table if not exists memos (
     id         integer primary key autoincrement,
     text       text not null,
+    tags       text,                    -- 쉼표로 구분된 태그들. 없으면 NULL.
+    done       integer not null default 0,  -- 완료 처리해도 지우지 않고 남겨서 회고에 씁니다.
     created_at text not null
 );
 
@@ -155,6 +157,10 @@ def _ensure_columns(conn):
         ],
         "preferences": [
             ("status", "text not null default 'active'"),
+        ],
+        "memos": [
+            ("tags", "text"),
+            ("done", "integer not null default 0"),
         ],
     }
     for table, columns in wanted.items():
@@ -361,17 +367,40 @@ def list_preferences() -> list[sqlite3.Row]:
 
 # ---------- 메모 ----------
 
-def add_memo(text: str) -> int:
+def memo_tags(tags: str | None) -> list[str]:
+    """저장된 tags 문자열("스케줄러,버그")을 리스트로. 없으면 빈 리스트."""
+    return tags.split(",") if tags else []
+
+
+def add_memo(text: str, tags: list[str] | None = None) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "insert into memos (text, created_at) values (?, ?)", (text, _now())
+            "insert into memos (text, tags, created_at) values (?, ?, ?)",
+            (text, ",".join(tags) if tags else None, _now()),
         )
         return cur.lastrowid
 
 
-def list_memos() -> list[sqlite3.Row]:
+def list_memos(tag: str | None = None) -> list[sqlite3.Row]:
+    """완료 안 된 메모만 반환합니다. 완료된 건 여기 안 보이지만 DB에는 남아 회고에 씁니다."""
     with connect() as conn:
-        return conn.execute("select id, text, created_at from memos order by id").fetchall()
+        rows = conn.execute(
+            "select id, text, tags, created_at from memos where done = 0 order by id"
+        ).fetchall()
+    if tag:
+        rows = [r for r in rows if tag in memo_tags(r["tags"])]
+    return rows
+
+
+def complete_memo(memo_id: int) -> bool:
+    """삭제가 아니라 완료 처리. 원문은 남아서 나중에 회고에 쓸 수 있습니다."""
+    with connect() as conn:
+        cur = conn.execute("update memos set done = 1 where id = ? and done = 0", (memo_id,))
+        return cur.rowcount > 0
+
+
+def days_since(ts: str) -> int:
+    return (datetime.now(TZ).replace(tzinfo=None) - _parse(ts)).days
 
 
 # ---------- 프롬프트 버전 ----------
