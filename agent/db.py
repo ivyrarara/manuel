@@ -58,6 +58,13 @@ create table if not exists preferences (
     created_at text not null
 );
 
+-- /memo로 사용자가 직접 남긴 메모. 체크인 판단과 대화 시스템 프롬프트 양쪽에서 참고합니다.
+create table if not exists memos (
+    id         integer primary key autoincrement,
+    text       text not null,
+    created_at text not null
+);
+
 -- 자율 체크인 기록 — 100일 뒤 들고 갈 데이터.
 create table if not exists checkins (
     id             integer primary key autoincrement,
@@ -350,6 +357,21 @@ def list_preferences() -> list[sqlite3.Row]:
         return conn.execute(
             "select id, text from preferences where active = 1 and status = 'active' order by id"
         ).fetchall()
+
+
+# ---------- 메모 ----------
+
+def add_memo(text: str) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "insert into memos (text, created_at) values (?, ?)", (text, _now())
+        )
+        return cur.lastrowid
+
+
+def list_memos() -> list[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute("select id, text, created_at from memos order by id").fetchall()
 
 
 # ---------- 프롬프트 버전 ----------

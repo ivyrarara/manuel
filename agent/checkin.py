@@ -117,6 +117,12 @@ def _context_block() -> str:
 
     lines.append(f"- 최근 7일간 기록된 배운 점: {len(learnings)}개")
 
+    memos = db.list_memos()
+    if memos:
+        lines.append(f"- 사용자가 /memo로 남긴 메모 {len(memos)}개:")
+        for m in memos:
+            lines.append(f"    · {m['text']} (저장: {m['created_at'][:10]})")
+
     weeks = db.weekly_depth(PACE_WINDOW_WEEKS)
     lines.append(f"- 최근 {PACE_WINDOW_WEEKS}주 성취 (페이스 판단의 핵심):")
     for w in weeks:

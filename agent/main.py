@@ -291,6 +291,27 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @owner_only
+async def memo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("사용법: /memo <내용>")
+        return
+    db.add_memo(text)
+    await update.message.reply_text("📌 메모했어요.")
+
+
+@owner_only
+async def memos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = db.list_memos()
+    if not rows:
+        await update.message.reply_text("아직 저장된 메모가 없어요. /memo <내용> 으로 남겨보세요.")
+        return
+    lines = ["저장된 메모:", ""]
+    lines += [f"{r['id']}. {r['text']} ({r['created_at'][:10]})" for r in rows]
+    await update.message.reply_text("\n".join(lines))
+
+
+@owner_only
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     silent = db.days_since_last_user_message()
     lines = [
@@ -651,6 +672,8 @@ def main():
     app.add_handler(CommandHandler("done", done))
     app.add_handler(CommandHandler("prefs", prefs))
     app.add_handler(CommandHandler("forget", forget))
+    app.add_handler(CommandHandler("memo", memo))
+    app.add_handler(CommandHandler("memos", memos))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("data", data))
     app.add_handler(CommandHandler("pace", pace))
