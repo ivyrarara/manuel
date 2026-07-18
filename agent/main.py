@@ -290,19 +290,23 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("잊었어요." if ok else "그 번호의 요구사항을 찾지 못했어요.")
 
 
+# 메시지 어디에 있든(맨 앞/뒤/중간) #단어 패턴을 태그로 뽑습니다.
+# 앞쪽에만 붙어야 인식되는 방식이면 "내용 #태그"처럼 뒤에 붙이거나 문장 중간에
+# 섞어 쓴 태그를 놓칩니다.
+MEMO_TAG_RE = re.compile(r"#(\S+)")
+
+
 def _parse_memo_args(args: list[str]) -> tuple[list[str], str]:
-    """`#태그 #태그2 내용...` 형태를 파싱. 태그 없이 내용만 써도 됩니다."""
-    tags = []
-    i = 0
-    while i < len(args) and args[i].startswith("#") and len(args[i]) > 1:
-        tags.append(args[i][1:])
-        i += 1
-    return tags, " ".join(args[i:]).strip()
+    """`#태그` 패턴을 위치 상관없이 전부 뽑고, 나머지를 본문으로 남깁니다."""
+    raw = " ".join(args)
+    tags = MEMO_TAG_RE.findall(raw)
+    text = " ".join(MEMO_TAG_RE.sub("", raw).split())
+    return tags, text
 
 
 def _format_memo_tags(tags: str | None) -> str:
     parsed = db.memo_tags(tags)
-    return f" [{', '.join(parsed)}]" if parsed else ""
+    return ", ".join(parsed) if parsed else "-"
 
 
 @owner_only
@@ -325,7 +329,7 @@ async def memos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
     lines = [f"'{tag}' 태그 메모:" if tag else "저장된 메모:", ""]
-    lines += [f"{r['id']}. {r['text']}{_format_memo_tags(r['tags'])} ({r['created_at'][:10]})" for r in rows]
+    lines += [f"[{r['id']}] [{_format_memo_tags(r['tags'])}] {r['text']} ({r['created_at'][:10]})" for r in rows]
     lines += ["", "완료 처리: /memo_done <번호>"]
     await update.message.reply_text("\n".join(lines))
 
