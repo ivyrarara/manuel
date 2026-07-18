@@ -537,16 +537,6 @@ def weekly_depth(weeks: int) -> list[dict]:
     return sorted(buckets.values(), key=lambda b: b["week_start"])
 
 
-def achievements_since_start() -> list[sqlite3.Row]:
-    """100일 시작일부터 지금까지의 성취 전부. 시작일 이전 날짜는 아예 대상이 아닙니다."""
-    with connect() as conn:
-        return conn.execute(
-            "select text, depth, created_at from insights "
-            "where type = 'achievement' and date(created_at) >= ? order by created_at",
-            (_start_date().isoformat(),),
-        ).fetchall()
-
-
 # ---------- GitHub ----------
 
 def github_activity_exists(key: str) -> bool:

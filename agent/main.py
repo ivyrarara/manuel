@@ -297,7 +297,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Day {db.day_number()} / {TOTAL_DAYS}",
         f"미완료 액션: {len(db.pending_actions())}개",
         f"최근 7일 배운 점: {len(db.learnings_since(7))}개",
-        f"최근 7일 성취: {len(db.achievements_since(7))}건 (/pace 로 전체 로그)",
+        f"최근 7일 성취: {len(db.achievements_since(7))}건 (/pace 로 최근 5일 로그)",
         f"마지막 대화: {silent}일 전" if silent is not None else "대화 기록 없음",
     ]
     recent = db.recent_checkins(3)
@@ -411,24 +411,14 @@ async def blog_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def pace(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """성취 로그 — 100일 시작일부터 지금까지, 깊이는 🧄 뒤 점 개수로."""
-    rows = db.achievements_since_start()
+    """성취 로그 — 최근 5일치만, 깊이는 🧄 뒤 점 개수로."""
+    rows = db.achievements_since(5)
     if not rows:
-        await update.message.reply_text("아직 성취 기록이 없어요. 뭔가 해냈으면 마늘한테 말해주세요.")
+        await update.message.reply_text("최근 5일간 성취 기록이 없어요. 뭔가 해냈으면 마늘한테 말해주세요.")
         return
 
     lines = [f"{r['created_at'][:10]}  🧄 {'•' * r['depth']}  {r['text']}" for r in rows]
-
-    # 텔레그램 메시지 길이 제한(4096자)을 넘을 만큼 쌓이면 나눠 보냅니다.
-    chunk, length = [], 0
-    for line in lines:
-        if chunk and length + len(line) + 1 > 3500:
-            await update.message.reply_text("\n".join(chunk))
-            chunk, length = [], 0
-        chunk.append(line)
-        length += len(line) + 1
-    if chunk:
-        await update.message.reply_text("\n".join(chunk))
+    await update.message.reply_text("\n".join(lines))
 
 
 async def send_post_insights(context: ContextTypes.DEFAULT_TYPE, post: dict):
