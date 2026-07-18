@@ -3,6 +3,7 @@
 핵심: 매 호출마다 system prompt를 [고정 배경 + 학습된 요구사항 + Day N]으로 다시 조립합니다.
 학습이란 결국 이 조립 재료가 DB에서 늘어나는 것입니다.
 """
+import base64
 import json
 import re
 
@@ -68,6 +69,7 @@ def build_system_prompt() -> str:
   그 외 일상·기분 글은 읽되 성취로 세지 않습니다.
 - **링크**: 사용자가 붙여넣은 링크의 본문이 메시지에 함께 전달됩니다.
   단, 자바스크립트로 그려지는 페이지는 본문이 안 옵니다. 그때만 못 읽었다고 하세요.
+- **사진**: 텔레그램으로 보낸 사진을 실제로 봅니다. 캡션이 있으면 함께 참고하세요.
 - **자율 체크인**: 매일 밤 스스로 깨어나 말을 걸지 판단합니다. 대부분은 침묵합니다.
 
 ## 당신이 못 하는 것
@@ -198,5 +200,35 @@ async def respond_to(user_message: str) -> dict:
     message_id = db.add_message("assistant", result["reply"])
     db.add_insights(message_id, result["insights"])
     # 바로 적용하지 않습니다. 사용자가 승인해야 마늘의 규칙이 됩니다.
+    result["proposed"] = db.propose_preferences(result["new_preferences"])
+    return result
+
+
+async def respond_to_photo(image_bytes: bytes, media_type: str, caption: str) -> dict:
+    """사진 메시지 처리.
+
+    대화 기록에는 이미지 원문 대신 "[사진] 캡션" 텍스트만 남깁니다. 원본 바이트를
+    DB에 쌓으면 100일치 사진이 그대로 커져서 부담이 되고, 나중 판단에도 텍스트
+    요약이면 충분합니다. 하지만 이번 호출만큼은 실제 이미지를 Claude에 보내
+    사진 자체를 보고 답하게 합니다.
+    """
+    placeholder = f"[사진] {caption}" if caption else "[사진]"
+    db.add_message("user", placeholder)
+    messages = db.history(HISTORY_LIMIT)
+
+    image_b64 = base64.standard_b64encode(image_bytes).decode()
+    messages[-1] = {
+        "role": "user",
+        "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+            {"type": "text", "text": caption or "(사진을 보냈어요. 캡션은 없어요.)"},
+        ],
+    }
+
+    raw = await call(messages)
+    result = parse_json_response(raw)
+
+    message_id = db.add_message("assistant", result["reply"])
+    db.add_insights(message_id, result["insights"])
     result["proposed"] = db.propose_preferences(result["new_preferences"])
     return result
