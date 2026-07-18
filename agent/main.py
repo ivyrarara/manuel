@@ -24,7 +24,8 @@ from .config import (
     BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, CHECKIN_HOUR, CHECKIN_MINUTE,
     GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, GITHUB_USER,
     FEEDBACK_LABELS, FEEDBACK_OPTIONS, LADDER, MONDAY_ACTIONS, OWNER_CHAT_ID,
-    PACE_WINDOW_WEEKS, SUNDAY_REVIEW, TELEGRAM_TOKEN, TOTAL_DAYS, TRIGGERS, TZ,
+    CHECKIN_DAYS, PACE_WINDOW_WEEKS, SUNDAY_REVIEW, TELEGRAM_TOKEN,
+    TOTAL_DAYS, TRIGGERS, TZ,
 )
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -632,7 +633,12 @@ def main():
     jq = app.job_queue
     jq.run_daily(job_blog, time=dtime(BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, tzinfo=TZ))
     jq.run_daily(job_github, time=dtime(GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, tzinfo=TZ))
-    jq.run_daily(job_checkin, time=dtime(CHECKIN_HOUR, CHECKIN_MINUTE, tzinfo=TZ))
+    # 일요일은 회고가 나가므로 자율 체크인을 건너뜁니다.
+    jq.run_daily(
+        job_checkin,
+        time=dtime(CHECKIN_HOUR, CHECKIN_MINUTE, tzinfo=TZ),
+        days=CHECKIN_DAYS,
+    )
 
     weekday, hour, minute = SUNDAY_REVIEW
     jq.run_daily(job_sunday_review, time=dtime(hour, minute, tzinfo=TZ), days=(weekday,))
