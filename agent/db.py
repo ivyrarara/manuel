@@ -193,17 +193,19 @@ def set_post_magazine(guid: str, is_magazine: bool):
         )
 
 
+def _start_date() -> date:
+    with connect() as conn:
+        row = conn.execute("select value from meta where key = 'start_date'").fetchone()
+    return date.fromisoformat(row["value"]) if row else _today()
+
+
 def day_number() -> int:
     """Day N. 사용자가 있는 곳의 날짜 기준입니다.
 
     date.today()는 컨테이너 시계를 봅니다. Railway는 UTC로 돕니다.
     토론토 저녁 8시면 UTC는 이미 다음 날이라, 매일 밤 4시간씩 하루가 앞서갑니다.
     """
-    with connect() as conn:
-        row = conn.execute("select value from meta where key = 'start_date'").fetchone()
-    today = _today()
-    start = date.fromisoformat(row["value"]) if row else today
-    return min(TOTAL_DAYS, max(1, (today - start).days + 1))
+    return min(TOTAL_DAYS, max(1, (_today() - _start_date()).days + 1))
 
 
 # ---------- 메시지 ----------
@@ -535,11 +537,13 @@ def weekly_depth(weeks: int) -> list[dict]:
     return sorted(buckets.values(), key=lambda b: b["week_start"])
 
 
-def achievement_totals() -> list[sqlite3.Row]:
+def achievements_since_start() -> list[sqlite3.Row]:
+    """100일 시작일부터 지금까지의 성취 전부. 시작일 이전 날짜는 아예 대상이 아닙니다."""
     with connect() as conn:
         return conn.execute(
-            "select depth, count(*) as n from insights "
-            "where type = 'achievement' group by depth order by depth"
+            "select text, depth, created_at from insights "
+            "where type = 'achievement' and date(created_at) >= ? order by created_at",
+            (_start_date().isoformat(),),
         ).fetchall()
 
 

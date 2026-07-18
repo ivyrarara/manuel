@@ -24,8 +24,8 @@ from . import blog, brain, checkin, db, github
 from .config import (
     BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, CHECKIN_HOUR, CHECKIN_MINUTE,
     GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, GITHUB_USER,
-    FEEDBACK_LABELS, FEEDBACK_OPTIONS, LADDER, MONDAY_ACTIONS, OWNER_CHAT_ID,
-    CHECKIN_DAYS, PACE_WINDOW_WEEKS, SUNDAY_REVIEW, TELEGRAM_TOKEN,
+    FEEDBACK_LABELS, FEEDBACK_OPTIONS, MONDAY_ACTIONS, OWNER_CHAT_ID,
+    CHECKIN_DAYS, SUNDAY_REVIEW, TELEGRAM_TOKEN,
     TOTAL_DAYS, TRIGGERS, TZ,
 )
 
@@ -85,7 +85,7 @@ def format_insights(insights: list[dict]) -> str:
     lines = ["", "———"]
     for i in insights:
         if i["type"] == "achievement":
-            lines.append(f"🧄 [{i['depth']}단] {i['text']}")
+            lines.append(f"🧄 {'•' * i['depth']} {i['text']}")
         elif i["type"] == "action":
             lines.append(f"✓ {i['text']}")
         else:
@@ -297,7 +297,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Day {db.day_number()} / {TOTAL_DAYS}",
         f"미완료 액션: {len(db.pending_actions())}개",
         f"최근 7일 배운 점: {len(db.learnings_since(7))}개",
-        f"최근 7일 성취: {len(db.achievements_since(7))}건 (/pace 로 자세히)",
+        f"최근 7일 성취: {len(db.achievements_since(7))}건 (/pace 로 전체 로그)",
         f"마지막 대화: {silent}일 전" if silent is not None else "대화 기록 없음",
     ]
     recent = db.recent_checkins(3)
@@ -411,26 +411,24 @@ async def blog_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def pace(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """페이스 — 개수가 아니라 도달 깊이."""
-    weeks = db.weekly_depth(PACE_WINDOW_WEEKS)
-    lines = [f"🏃 페이스 (Day {db.day_number()} / {TOTAL_DAYS})", ""]
-    for w in weeks:
-        if w["max_depth"]:
-            label = LADDER[w["max_depth"]].split(" —")[0]
-            bar = "█" * w["max_depth"] + "·" * (6 - w["max_depth"])
-            lines.append(f"{w['week_start']}  {bar}  {w['max_depth']}단 {label} ({w['count']}건)")
-        else:
-            lines.append(f"{w['week_start']}  ······  성취 없음")
+    """성취 로그 — 100일 시작일부터 지금까지, 깊이는 🧄 뒤 점 개수로."""
+    rows = db.achievements_since_start()
+    if not rows:
+        await update.message.reply_text("아직 성취 기록이 없어요. 뭔가 해냈으면 마늘한테 말해주세요.")
+        return
 
-    totals = db.achievement_totals()
-    if totals:
-        lines += ["", "누적:"]
-        for t in totals:
-            if t["depth"]:
-                lines.append(f"· {t['depth']}단 {LADDER[t['depth']].split(' —')[0]}: {t['n']}건")
-    else:
-        lines += ["", "아직 성취 기록이 없어요. 뭔가 해냈으면 마늘한테 말해주세요."]
-    await update.message.reply_text("\n".join(lines))
+    lines = [f"{r['created_at'][:10]}  🧄 {'•' * r['depth']}  {r['text']}" for r in rows]
+
+    # 텔레그램 메시지 길이 제한(4096자)을 넘을 만큼 쌓이면 나눠 보냅니다.
+    chunk, length = [], 0
+    for line in lines:
+        if chunk and length + len(line) + 1 > 3500:
+            await update.message.reply_text("\n".join(chunk))
+            chunk, length = [], 0
+        chunk.append(line)
+        length += len(line) + 1
+    if chunk:
+        await update.message.reply_text("\n".join(chunk))
 
 
 async def send_post_insights(context: ContextTypes.DEFAULT_TYPE, post: dict):
