@@ -46,12 +46,14 @@ create table if not exists blog_posts (
     link       text,
     published  text,
     content    text,              -- 글 원문. 분석 프롬프트를 고쳐도 옛 글에 다시 돌릴 수 있게.
+    is_magazine integer not null default 1,  -- 성취로 세는 매거진 글인가
     created_at text not null
 );
 
 create table if not exists preferences (
     id         integer primary key autoincrement,
     text       text not null unique,
+    status     text not null default 'active',  -- pending / active / rejected
     active     integer not null default 1,
     created_at text not null
 );
@@ -102,6 +104,16 @@ def _parse(ts: str) -> datetime:
     return datetime.strptime(ts, TS_FORMAT)
 
 
+def _today() -> date:
+    """오늘 날짜. 반드시 사용자의 타임존 기준입니다.
+
+    date.today()는 시스템 타임존을 봅니다. Railway 컨테이너는 UTC로 돌기 때문에,
+    토론토 저녁 8시에 이미 UTC 자정이 지나 날짜가 넘어갑니다.
+    그러면 Day 카운터가 저녁 8시마다 하루씩 올라갑니다.
+    """
+    return datetime.now(TZ).date()
+
+
 def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -109,22 +121,89 @@ def connect():
     return conn
 
 
+def _ensure_columns(conn):
+    """이미 만들어진 테이블에 빠진 컬럼을 채웁니다.
+
+    'create table if not exists'는 테이블이 있으면 그냥 넘어갑니다. 그래서 나중에
+    스키마에 컬럼을 추가해도, 이미 돌고 있던 DB에는 반영되지 않습니다.
+    그 상태로 insert하면 터집니다 — 그것도 새 데이터가 들어오는 순간에만 터지므로
+    한참 뒤에야 발견됩니다. 켤 때마다 확인해서 조용히 메꿉니다.
+    """
+    wanted = {
+        "blog_posts": [
+            ("content", "text"),
+            ("is_magazine", "integer not null default 1"),
+        ],
+        "checkins": [
+            ("trigger", "text"),
+            ("confidence", "integer"),
+            ("unspoken", "text"),
+            ("prompt_version", "text"),
+            ("raw_input", "text"),
+            ("feedback", "text"),
+            ("feedback_at", "text"),
+        ],
+        "insights": [
+            ("depth", "integer"),
+        ],
+        "preferences": [
+            ("status", "text not null default 'active'"),
+        ],
+    }
+    for table, columns in wanted.items():
+        exists = conn.execute(
+            "select name from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        have = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"alter table {table} add column {name} {decl}")
+                print(f"[migration] {table}.{name} 추가됨")
+
+
 def init():
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _ensure_columns(conn)
         for pref in SEED_PREFERENCES:
             conn.execute(
-                "insert or ignore into preferences (text, created_at) values (?, ?)", (pref, _now())
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'active', ?)",
+                (pref, _now()),
             )
-        start = START_DATE or date.today().isoformat()
+        # date.today()는 컨테이너 시계(대개 UTC)를 봅니다. 사용자의 날짜와 다릅니다.
+        start = START_DATE or _today().isoformat()
         conn.execute("insert or ignore into meta (key, value) values ('start_date', ?)", (start,))
 
 
+def unclassified_posts() -> list[sqlite3.Row]:
+    """매거진 판별 전에 저장된 글들. 다시 분류해야 합니다."""
+    with connect() as conn:
+        return conn.execute(
+            "select guid, title, link from blog_posts where link is not null and link != ''"
+        ).fetchall()
+
+
+def set_post_magazine(guid: str, is_magazine: bool):
+    with connect() as conn:
+        conn.execute(
+            "update blog_posts set is_magazine = ? where guid = ?", (int(is_magazine), guid)
+        )
+
+
 def day_number() -> int:
+    """Day N. 사용자가 있는 곳의 날짜 기준입니다.
+
+    date.today()는 컨테이너 시계를 봅니다. Railway는 UTC로 돕니다.
+    토론토 저녁 8시면 UTC는 이미 다음 날이라, 매일 밤 4시간씩 하루가 앞서갑니다.
+    """
     with connect() as conn:
         row = conn.execute("select value from meta where key = 'start_date'").fetchone()
-    start = date.fromisoformat(row["value"]) if row else date.today()
-    return min(TOTAL_DAYS, max(1, (date.today() - start).days + 1))
+    today = _today()
+    start = date.fromisoformat(row["value"]) if row else today
+    return min(TOTAL_DAYS, max(1, (today - start).days + 1))
 
 
 # ---------- 메시지 ----------
@@ -197,21 +276,65 @@ def learnings_since(days: int) -> list[sqlite3.Row]:
 # ---------- 선호 ----------
 
 def preferences() -> list[str]:
+    """마늘이 실제로 지키는 요구사항. 승인된 것만입니다.
+
+    승인 전(pending)인 것은 여기 안 들어옵니다. 그래서 프롬프트 버전도
+    사용자가 승인하는 순간에만 바뀝니다 — 지나가는 말이 데이터를 오염시키지 않습니다.
+    """
     with connect() as conn:
-        rows = conn.execute("select text from preferences where active = 1 order by id").fetchall()
+        rows = conn.execute(
+            "select text from preferences where active = 1 and status = 'active' order by id"
+        ).fetchall()
     return [r["text"] for r in rows]
 
 
-def add_preferences(texts: list[str]) -> list[str]:
-    added = []
+def seed_preferences(texts: list[str]):
+    """초기 요구사항. 사용자가 직접 정한 것이므로 바로 승인 상태로 넣습니다."""
+    with connect() as conn:
+        for t in texts:
+            conn.execute(
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'active', ?)",
+                (t, _now()),
+            )
+
+
+def propose_preferences(texts: list[str]) -> list[sqlite3.Row]:
+    """마늘이 감지한 요구사항을 **승인 대기**로 넣습니다.
+
+    바로 적용하지 않습니다. 지나가는 말이 영구 정책이 되면 안 되고,
+    그 순간 프롬프트 버전까지 바뀌어 100일치 데이터 해석이 오염됩니다.
+    한 번 거절한 것은 다시 묻지 않습니다.
+    """
+    proposed = []
     with connect() as conn:
         for t in texts:
             cur = conn.execute(
-                "insert or ignore into preferences (text, created_at) values (?, ?)", (t, _now())
+                "insert or ignore into preferences (text, status, created_at) "
+                "values (?, 'pending', ?)",
+                (t, _now()),
             )
             if cur.rowcount:
-                added.append(t)
-    return added
+                row = conn.execute(
+                    "select id, text from preferences where text = ?", (t,)
+                ).fetchone()
+                proposed.append(row)
+    return proposed
+
+
+def resolve_preference(pref_id: int, approved: bool) -> str | None:
+    """승인 또는 거절. 요구사항 문구를 반환."""
+    with connect() as conn:
+        row = conn.execute(
+            "select text from preferences where id = ? and status = 'pending'", (pref_id,)
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "update preferences set status = ? where id = ?",
+            ("active" if approved else "rejected", pref_id),
+        )
+        return row["text"]
 
 
 def forget_preference(pref_id: int) -> bool:
@@ -223,7 +346,7 @@ def forget_preference(pref_id: int) -> bool:
 def list_preferences() -> list[sqlite3.Row]:
     with connect() as conn:
         return conn.execute(
-            "select id, text from preferences where active = 1 order by id"
+            "select id, text from preferences where active = 1 and status = 'active' order by id"
         ).fetchall()
 
 
@@ -395,7 +518,7 @@ def weekly_depth(weeks: int) -> list[dict]:
     성취가 없는 주도 0으로 채워서 반환합니다 — 빈 주가 안 보이면 페이스를 못 잽니다.
     """
     rows = achievements_since(weeks * 7)
-    today = datetime.now(TZ).date()
+    today = _today()
     buckets = {}
     for i in range(weeks):
         start = today - timedelta(days=today.weekday() + 7 * i)
@@ -462,7 +585,8 @@ def blog_post_exists(guid: str) -> bool:
         ).fetchone() is not None
 
 
-def add_blog_post(guid: str, title: str, link: str, published: str, content: str = "") -> bool:
+def add_blog_post(guid: str, title: str, link: str, published: str,
+                  content: str = "", is_magazine: bool = True) -> bool:
     """새 글이면 True. 이미 있으면 False.
 
     content는 글 원문입니다. 분석 결과만 저장하고 원문을 버리면,
@@ -470,11 +594,22 @@ def add_blog_post(guid: str, title: str, link: str, published: str, content: str
     """
     with connect() as conn:
         cur = conn.execute(
-            "insert or ignore into blog_posts (guid, title, link, published, content, created_at) "
-            "values (?, ?, ?, ?, ?, ?)",
-            (guid, title, link, published, content, _now()),
+            "insert or ignore into blog_posts "
+            "(guid, title, link, published, content, is_magazine, created_at) "
+            "values (?, ?, ?, ?, ?, ?, ?)",
+            (guid, title, link, published, content, int(is_magazine), _now()),
         )
         return cur.rowcount > 0
+
+
+def personal_posts_since(days: int, limit: int = 3) -> list[sqlite3.Row]:
+    """매거진 밖의 글 — 일상과 기분. 성취는 아니지만 마늘이 알아야 할 맥락입니다."""
+    with connect() as conn:
+        return conn.execute(
+            "select title, content, created_at from blog_posts "
+            "where is_magazine = 0 and created_at >= ? order by created_at desc limit ?",
+            (_cutoff(days), limit),
+        ).fetchall()
 
 
 def blog_post_count() -> int:

@@ -8,9 +8,11 @@
 실행: python -m agent.main
 """
 import logging
+import re
 from datetime import time as dtime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import InvalidToken
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -22,10 +24,21 @@ from .config import (
     BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, CHECKIN_HOUR, CHECKIN_MINUTE,
     GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, GITHUB_USER,
     FEEDBACK_LABELS, FEEDBACK_OPTIONS, LADDER, MONDAY_ACTIONS, OWNER_CHAT_ID,
-    PACE_WINDOW_WEEKS, SUNDAY_REVIEW, TELEGRAM_TOKEN, TOTAL_DAYS, TRIGGERS, TZ,
+    CHECKIN_DAYS, PACE_WINDOW_WEEKS, SUNDAY_REVIEW, TELEGRAM_TOKEN,
+    TOTAL_DAYS, TRIGGERS, TZ,
 )
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
+
+# httpx는 모든 요청 URL을 INFO로 남깁니다. 그런데 텔레그램 API는 주소 안에 토큰을 넣습니다:
+#   POST https://api.telegram.org/bot<토큰>/getMe
+# 그래서 로그를 남에게 보여주는 순간 봇이 탈취됩니다. WARNING으로 올려서 막습니다.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+# 스케줄러가 잡 등록할 때마다 남기는 잡음도 줄입니다.
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+
 log = logging.getLogger("maneul")
 
 
@@ -48,6 +61,14 @@ def feedback_keyboard(checkin_id: int) -> InlineKeyboardMarkup:
     ]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(rows)
+
+
+def preference_keyboard(pref_id: int) -> InlineKeyboardMarkup:
+    """승인 없이는 규칙이 되지 않습니다. 탭 한 번이면 충분하니 마찰도 거의 없습니다."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🧠 기억해", callback_data=f"pref:{pref_id}:y"),
+        InlineKeyboardButton("🙅 아니", callback_data=f"pref:{pref_id}:n"),
+    ]])
 
 
 def silence_keyboard(checkin_id: int) -> InlineKeyboardMarkup:
@@ -81,6 +102,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# 주소에 쓸 수 있는 문자만 인정합니다.
+# `[^\s]+` 로 잡으면 "brunch.co.kr/@ivyra/301이게" 처럼 띄어쓰기 없이 붙여 쓴
+# 한글까지 주소로 삼아버립니다. 그러면 없는 주소를 부르게 되고, 조용히 실패합니다.
+URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+
+
+def _extract_url(text: str) -> str | None:
+    urls = URL_RE.findall(text)
+    if not urls:
+        return None
+    # 문장 끝에 붙은 마침표·쉼표·괄호는 주소가 아닙니다.
+    return urls[0].rstrip(".,;:!?)'\"")
+
+
+async def _with_link_content(text: str) -> str:
+    """메시지에 링크가 있으면 읽어서 함께 넘깁니다.
+
+    마늘은 링크를 클릭할 수 없습니다. 붙여넣은 글을 읽어주길 기대하는 건
+    자연스러운데, 그걸 못 하면 "접근할 수 없어요"만 반복하게 됩니다.
+    """
+    url = _extract_url(text)
+    if not url:
+        return text
+
+    article = await blog.fetch_url_text(url)
+    if not article or len(article) < 100:
+        log.warning("링크를 읽지 못했어요: %s", url)
+        return text
+    return f"{text}\n\n[아래는 사용자가 보낸 링크의 내용입니다]\n{article[:10000]}"
+
+
 @owner_only
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -90,6 +142,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=OWNER_CHAT_ID, action=ChatAction.TYPING)
 
     try:
+        text = await _with_link_content(text)
         result = await brain.respond_to(text)
     except Exception:
         log.exception("응답 생성 실패")
@@ -98,9 +151,31 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
 
-    if result["learned"]:
-        learned = "\n".join(f"· {p}" for p in result["learned"])
-        await update.message.reply_text(f"🧠 기억했어요:\n{learned}\n\n/forget 으로 지울 수 있어요.")
+    # 지나가는 말이 영구 규칙이 되지 않도록, 승인을 받고 나서 적용합니다.
+    for pref in result["proposed"]:
+        await update.message.reply_text(
+            f"🧠 이걸 규칙으로 기억할까요?\n\n“{pref['text']}”",
+            reply_markup=preference_keyboard(pref["id"]),
+        )
+
+
+@owner_only
+async def on_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """요구사항 승인/거절."""
+    query = update.callback_query
+    _, raw_id, code = query.data.split(":", 2)
+    approved = code == "y"
+
+    text = db.resolve_preference(int(raw_id), approved)
+    if text is None:
+        await query.answer("이미 처리했어요")
+        return
+
+    await query.answer("기억할게요" if approved else "잊을게요")
+    label = "🧠 기억함 — 이제 규칙이에요" if approved else "🙅 안 기억함"
+    await query.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="noop")]])
+    )
 
 
 @owner_only
@@ -267,14 +342,22 @@ async def blog_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"✅ 연결됐어요. 글 {result['total']}개가 보여요."]
     if result.get("first_run"):
-        lines.append(f"\n기존 글 {len(result['new'])}개는 성취로 세지 않았어요.")
-        lines.append("과거 글을 오늘 성취로 넣으면 페이스 차트가 거짓말이 되니까요.")
-        lines.append("지금부터 올리는 글이 6단 성취로 잡혀요.")
-    elif result["recorded"]:
-        lines.append("\n새 글을 6단 성취로 기록했어요:")
-        lines += [f"🧄 {p['title']}" for p in result["recorded"]]
+        mag = sum(1 for p in result["new"] if p["is_magazine"])
+        lines.append(f"\n분류: 매거진 글 {mag}개 / 그 외 {len(result['new']) - mag}개")
+        lines.append("(기존 글은 성취로 세지 않았어요 — 과거 글을 오늘 성취로 넣으면")
+        lines.append("페이스 차트가 1일차부터 거짓말이 되니까요.)")
+        lines.append("\n지금부터 매거진에 올리는 글이 6단 성취로 잡혀요.")
     else:
-        lines.append("\n새 글은 없어요.")
+        mag = [p for p in result["new"] if p["is_magazine"]]
+        personal = [p for p in result["new"] if not p["is_magazine"]]
+        if mag:
+            lines.append("\n매거진 글 — 6단 성취로 기록했어요:")
+            lines += [f"🧄 {p['title']}" for p in mag]
+        if personal:
+            lines.append("\n매거진 밖 글 — 읽었지만 성취로 세지 않았어요:")
+            lines += [f"📖 {p['title']}" for p in personal]
+        if not result["new"]:
+            lines.append("\n새 글은 없어요.")
     await update.message.reply_text("\n".join(lines))
 
     for post in result["recorded"][:1]:
@@ -342,6 +425,35 @@ async def send_post_insights(context: ContextTypes.DEFAULT_TYPE, post: dict):
     mid = db.add_message("assistant", text)
     if result["missed"]:
         db.add_insights(mid, [{"text": m, "type": "learning"} for m in result["missed"]])
+
+
+@owner_only
+async def reclassify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """매거진 판별 기능이 생기기 전에 저장된 글들을 다시 분류합니다."""
+    posts = db.unclassified_posts()
+    if not posts:
+        await update.message.reply_text("분류할 글이 없어요.")
+        return
+
+    await update.message.reply_text(f"{len(posts)}개 글을 다시 분류할게요. 좀 걸려요...")
+    mag, personal, failed = [], [], []
+
+    for p in posts:
+        html = await blog.fetch_raw_html(p["link"])
+        if not html:
+            failed.append(p["title"])
+            continue
+        is_mag = blog._is_magazine_post(html)
+        db.set_post_magazine(p["guid"], is_mag)
+        (mag if is_mag else personal).append(p["title"])
+
+    lines = [f"🧄 매거진 글 {len(mag)}개 (성취로 셈)"]
+    lines += [f"  · {t}" for t in mag[:5]]
+    lines.append(f"\n📖 그 외 {len(personal)}개 (읽지만 성취 아님)")
+    lines += [f"  · {t}" for t in personal[:5]]
+    if failed:
+        lines.append(f"\n⚠️ 판별 실패 {len(failed)}개 — 성취로 세지 않아요")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def job_blog(context: ContextTypes.DEFAULT_TYPE):
@@ -435,8 +547,23 @@ async def job_checkin(context: ContextTypes.DEFAULT_TYPE):
             "말 검" if decision["speak"] else "침묵",
             decision["trigger"], decision["confidence"], decision["reason"],
         )
-    except Exception:
+    except Exception as e:
+        # 침묵이 기본값인 에이전트는 죽어도 티가 나지 않습니다.
+        # 고장난 마늘과 침묵을 선택한 마늘이 똑같아 보이면 100일이 통째로 날아갑니다.
+        # 그래서 체크인이 실패하면 반드시 알립니다.
         log.exception("체크인 실패")
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=(
+                    "⚠️ 오늘 체크인이 실패했어요. 침묵이 아니라 고장이에요.\n\n"
+                    f"{type(e).__name__}: {str(e)[:200]}\n\n"
+                    "크레딧이 떨어졌거나(console.anthropic.com → Billing), "
+                    "일시적인 오류일 수 있어요. /checkin 으로 다시 시도해보세요."
+                ),
+            )
+        except Exception:
+            log.exception("실패 알림조차 보내지 못함")
 
 
 async def job_sunday_review(context: ContextTypes.DEFAULT_TYPE):
@@ -486,7 +613,6 @@ def main():
     db.init()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("actions", actions))
     app.add_handler(CommandHandler("done", done))
@@ -497,15 +623,22 @@ def main():
     app.add_handler(CommandHandler("pace", pace))
     app.add_handler(CommandHandler("blog", blog_check))
     app.add_handler(CommandHandler("github", github_check))
+    app.add_handler(CommandHandler("reclassify", reclassify))
     app.add_handler(CommandHandler("checkin", checkin_now))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(on_preference, pattern=r"^pref:"))
     app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^(fb|sr):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
     jq = app.job_queue
     jq.run_daily(job_blog, time=dtime(BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, tzinfo=TZ))
     jq.run_daily(job_github, time=dtime(GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, tzinfo=TZ))
-    jq.run_daily(job_checkin, time=dtime(CHECKIN_HOUR, CHECKIN_MINUTE, tzinfo=TZ))
+    # 일요일은 회고가 나가므로 자율 체크인을 건너뜁니다.
+    jq.run_daily(
+        job_checkin,
+        time=dtime(CHECKIN_HOUR, CHECKIN_MINUTE, tzinfo=TZ),
+        days=CHECKIN_DAYS,
+    )
 
     weekday, hour, minute = SUNDAY_REVIEW
     jq.run_daily(job_sunday_review, time=dtime(hour, minute, tzinfo=TZ), days=(weekday,))
@@ -514,7 +647,17 @@ def main():
     jq.run_daily(job_monday_actions, time=dtime(hour, minute, tzinfo=TZ), days=(weekday,))
 
     log.info("마늘 시작. Day %s / %s", db.day_number(), TOTAL_DAYS)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except InvalidToken:
+        # 라이브러리가 던지는 예외 메시지에는 토큰 원문이 들어 있습니다.
+        # 그대로 두면 크래시할 때마다 로그에 토큰이 찍힙니다. 삼키고 안전한 안내만 남깁니다.
+        log.error(
+            "텔레그램 토큰이 거부됐어요. TELEGRAM_TOKEN을 확인하세요. "
+            "(형태: 숫자:문자열, 콜론은 하나. 기존 값을 지우고 새로 붙여넣었는지 확인)"
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
