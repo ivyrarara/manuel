@@ -75,6 +75,28 @@ GENERIC_MESSAGES = (
 )
 
 
+def _extract_message(raw: str) -> str | None:
+    """커밋 메시지 한 줄을 성취 문구 후보로 정리. 못 쓰면 None.
+
+    "Merge branch 'x' into y" 같은 순수 브랜치 병합은 실제 작업이 아니므로 버립니다.
+    "Merge pull request #N from owner/branch" 는 GitHub 웹에서 PR을 merge하면
+    자동으로 붙는 첫 줄일 뿐이고, 그 다음 줄에 진짜 PR 제목이 옵니다 — 그 부분은
+    실제 작업 내용이므로 살립니다. 이 구분을 안 하면 PR을 merge할 때마다
+    그날 한 일이 통째로 버려집니다.
+    """
+    if not raw:
+        return None
+    first_line, _, rest = raw.partition("\n")
+    first_line = first_line.strip()
+    lowered = first_line.lower()
+    if lowered.startswith("merge pull request"):
+        body = rest.strip().split("\n")[0].strip()
+        return body or None
+    if lowered.startswith("merge"):
+        return None
+    return first_line or None
+
+
 def _pick_message(messages: list[str]) -> str:
     """그날의 커밋 중 가장 설명적인 것 하나.
 
@@ -82,7 +104,7 @@ def _pick_message(messages: list[str]) -> str:
     그걸 성취로 남기면 100일 뒤에 의미 없는 기록만 쌓입니다.
     사람이 직접 쓴 메시지가 하나라도 있으면 그걸 씁니다.
     """
-    cleaned = [m.split("\n")[0].strip() for m in messages if m and not m.startswith("Merge")]
+    cleaned = [c for c in (_extract_message(m) for m in messages) if c]
     meaningful = [
         m for m in cleaned
         if not any(m.lower().startswith(g) for g in GENERIC_MESSAGES)
@@ -93,12 +115,17 @@ def _pick_message(messages: list[str]) -> str:
 
 
 def _digest(events: list) -> list[dict]:
-    """이벤트를 (저장소, 날짜) 단위로 묶습니다. 하루 9커밋 → 성취 1건.
+    """이벤트를 묶습니다. 반환: [{"key","repo","date","kind","commits","message"}...]
 
-    반환: [{"key","repo","date","kind","commits","message"}...]
+    push/create는 (저장소, 날짜) 단위 — 하루 9커밋도 성취 1건.
+    merge(PR 병합)는 PR 번호 단위로 따로 묶습니다. 같은 날 (저장소, 날짜) 묶음이
+    이미 기록된 뒤에 또 다른 PR을 merge해도, push 쪽 dedup 키는 그날 하루로
+    고정돼 있어서 다시 안 잡힙니다. merge를 PR 번호로 독립적으로 추적해야
+    "그날 이미 뭔가 기록됐다"는 이유로 나중에 merge한 PR이 조용히 묻히지 않습니다.
     """
     pushes = collections.defaultdict(lambda: {"commits": 0, "messages": []})
     creates = {}
+    merges = {}
 
     for e in events:
         repo = (e.get("repo") or {}).get("name")
@@ -106,16 +133,27 @@ def _digest(events: list) -> list[dict]:
         if not repo or not created:
             continue
         date = created[:10]
+        etype = e.get("type")
 
-        if e.get("type") == "PushEvent":
+        if etype == "PushEvent":
             commits = (e.get("payload") or {}).get("commits") or []
             bucket = pushes[(repo, date)]
             bucket["commits"] += len(commits)
             bucket["messages"] += [c.get("message", "") for c in commits if c.get("message")]
 
-        elif e.get("type") == "CreateEvent":
+        elif etype == "CreateEvent":
             if (e.get("payload") or {}).get("ref_type") == "repository":
                 creates[(repo, date)] = True
+
+        elif etype == "PullRequestEvent":
+            payload = e.get("payload") or {}
+            pr = payload.get("pull_request") or {}
+            number = pr.get("number")
+            if payload.get("action") == "closed" and pr.get("merged") and number is not None:
+                merges[(repo, number)] = {
+                    "title": (pr.get("title") or f"PR #{number}").strip(),
+                    "date": (pr.get("merged_at") or created)[:10],
+                }
 
     items = []
     for (repo, date) in creates:
@@ -129,6 +167,11 @@ def _digest(events: list) -> list[dict]:
         items.append({
             "key": f"push:{repo}:{date}", "repo": repo, "date": date,
             "kind": "push", "commits": b["commits"], "message": _pick_message(b["messages"]),
+        })
+    for (repo, number), m in merges.items():
+        items.append({
+            "key": f"merge:{repo}:{number}", "repo": repo, "date": m["date"],
+            "kind": "merge", "commits": 0, "message": m["title"],
         })
 
     return sorted(items, key=lambda i: i["date"])
@@ -145,6 +188,10 @@ def _describe(item: dict) -> tuple[str, int]:
     short = item["repo"].split("/")[-1]
     if item["kind"] == "create":
         return f"새 저장소 만듦: {short}", 4  # 구현
+
+    if item["kind"] == "merge":
+        # PR 제목은 _digest에서 이미 항상 채워서 넘깁니다 (없으면 "PR #N"으로 대체).
+        return f"{short} PR 병합 — {item['message']}", 5  # 개선
 
     detail = f" — {item['message']}" if item["message"] else ""
     friction = f" ({item['commits']}번 만에)" if item["commits"] > 2 else ""
