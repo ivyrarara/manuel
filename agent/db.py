@@ -193,17 +193,19 @@ def set_post_magazine(guid: str, is_magazine: bool):
         )
 
 
+def _start_date() -> date:
+    with connect() as conn:
+        row = conn.execute("select value from meta where key = 'start_date'").fetchone()
+    return date.fromisoformat(row["value"]) if row else _today()
+
+
 def day_number() -> int:
     """Day N. 사용자가 있는 곳의 날짜 기준입니다.
 
     date.today()는 컨테이너 시계를 봅니다. Railway는 UTC로 돕니다.
     토론토 저녁 8시면 UTC는 이미 다음 날이라, 매일 밤 4시간씩 하루가 앞서갑니다.
     """
-    with connect() as conn:
-        row = conn.execute("select value from meta where key = 'start_date'").fetchone()
-    today = _today()
-    start = date.fromisoformat(row["value"]) if row else today
-    return min(TOTAL_DAYS, max(1, (today - start).days + 1))
+    return min(TOTAL_DAYS, max(1, (_today() - _start_date()).days + 1))
 
 
 # ---------- 메시지 ----------
@@ -533,14 +535,6 @@ def weekly_depth(weeks: int) -> list[dict]:
             b["max_depth"] = max(b["max_depth"], r["depth"] or 0)
 
     return sorted(buckets.values(), key=lambda b: b["week_start"])
-
-
-def achievement_totals() -> list[sqlite3.Row]:
-    with connect() as conn:
-        return conn.execute(
-            "select depth, count(*) as n from insights "
-            "where type = 'achievement' group by depth order by depth"
-        ).fetchall()
 
 
 # ---------- GitHub ----------
