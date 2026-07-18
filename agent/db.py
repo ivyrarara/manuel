@@ -104,6 +104,16 @@ def _parse(ts: str) -> datetime:
     return datetime.strptime(ts, TS_FORMAT)
 
 
+def _today() -> date:
+    """오늘 날짜. 반드시 사용자의 타임존 기준입니다.
+
+    date.today()는 시스템 타임존을 봅니다. Railway 컨테이너는 UTC로 돌기 때문에,
+    토론토 저녁 8시에 이미 UTC 자정이 지나 날짜가 넘어갑니다.
+    그러면 Day 카운터가 저녁 8시마다 하루씩 올라갑니다.
+    """
+    return datetime.now(TZ).date()
+
+
 def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -163,7 +173,8 @@ def init():
                 "values (?, 'active', ?)",
                 (pref, _now()),
             )
-        start = START_DATE or date.today().isoformat()
+        # date.today()는 컨테이너 시계(대개 UTC)를 봅니다. 사용자의 날짜와 다릅니다.
+        start = START_DATE or _today().isoformat()
         conn.execute("insert or ignore into meta (key, value) values ('start_date', ?)", (start,))
 
 
@@ -183,10 +194,16 @@ def set_post_magazine(guid: str, is_magazine: bool):
 
 
 def day_number() -> int:
+    """Day N. 사용자가 있는 곳의 날짜 기준입니다.
+
+    date.today()는 컨테이너 시계를 봅니다. Railway는 UTC로 돕니다.
+    토론토 저녁 8시면 UTC는 이미 다음 날이라, 매일 밤 4시간씩 하루가 앞서갑니다.
+    """
     with connect() as conn:
         row = conn.execute("select value from meta where key = 'start_date'").fetchone()
-    start = date.fromisoformat(row["value"]) if row else date.today()
-    return min(TOTAL_DAYS, max(1, (date.today() - start).days + 1))
+    today = _today()
+    start = date.fromisoformat(row["value"]) if row else today
+    return min(TOTAL_DAYS, max(1, (today - start).days + 1))
 
 
 # ---------- 메시지 ----------
@@ -501,7 +518,7 @@ def weekly_depth(weeks: int) -> list[dict]:
     성취가 없는 주도 0으로 채워서 반환합니다 — 빈 주가 안 보이면 페이스를 못 잽니다.
     """
     rows = achievements_since(weeks * 7)
-    today = datetime.now(TZ).date()
+    today = _today()
     buckets = {}
     for i in range(weeks):
         start = today - timedelta(days=today.weekday() + 7 * i)
