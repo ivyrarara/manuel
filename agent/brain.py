@@ -9,7 +9,7 @@ import re
 
 from anthropic import AsyncAnthropic
 
-from . import db
+from . import blog, db, github
 from .config import ANTHROPIC_API_KEY, HISTORY_LIMIT, LADDER, MODEL, TOTAL_DAYS, BACKGROUND
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -25,6 +25,45 @@ def build_system_prompt() -> str:
         + f" ({m['created_at'][:10]})"
         for m in memos
     ) if memos else "- (아직 없음)"
+
+    # 실제로 켜져 있는 연동만 "할 수 있는 것"에 넣습니다. GITHUB_USER/BLOG_RSS_URL이
+    # 비어있으면 해당 기능은 꺼져 있는데도 무조건 "할 수 있다"고 적으면, 실제로는
+    # 한 번도 못 본 데이터를 봤다고 우기거나 반대로 스스로 부정하는 모순이 생깁니다.
+    capabilities = []
+    if github.enabled():
+        capabilities.append(
+            "- **GitHub**: 사용자의 공개 저장소 활동을 매일 읽습니다. 커밋은 5단 개선, 새 저장소는 4단 구현\n"
+            "  성취로 자동 기록됩니다. 커밋 수는 성과가 아니라 마찰로 읽습니다 — 9커밋은 아홉 번 틀렸다는 뜻입니다."
+        )
+    if blog.enabled():
+        capabilities.append(
+            "- **블로그**: 브런치 RSS를 매일 읽습니다. 지정한 매거진 글은 6단 기록 성취로 세고,\n"
+            "  그 외 일상·기분 글은 읽되 성취로 세지 않습니다."
+        )
+    capabilities += [
+        "- **링크**: 사용자가 붙여넣은 링크의 본문이 메시지에 함께 전달됩니다.\n"
+        "  단, 자바스크립트로 그려지는 페이지는 본문이 안 옵니다. 그때만 못 읽었다고 하세요.",
+        "- **사진**: 텔레그램으로 보낸 사진을 실제로 봅니다. 캡션이 있으면 함께 참고하세요.",
+        "- **메모**: 사용자가 `/memo`로 남긴, 아직 완료 처리 안 된 메모를 위 \"사용자가 /memo로 남긴 메모\"에서\n"
+        "  항상 참고합니다. `/memos`로 전체 목록, `/memos 태그`로 태그별 목록을 볼 수 있어요.",
+        f"- **최근 대화**: 지금 이 대화에서 최근 주고받은 메시지 최대 {HISTORY_LIMIT}개(사용자+당신 것 합산)를\n"
+        "  매번 함께 보고 답합니다.",
+        "- **자율 체크인**: 매일 밤 스스로 깨어나 말을 걸지 판단합니다. 대부분은 침묵합니다.",
+    ]
+    capabilities_block = "\n".join(capabilities)
+
+    limitations = [
+        "- 앱 사용 기록, Firebase 같은 외부 데이터베이스",
+        "- 비공개 저장소, 실시간 웹 검색",
+        "- 자바스크립트로 그려지는 페이지의 내용",
+        f"- 최근 {HISTORY_LIMIT}개보다 오래된 대화 — 그 이전 내용은 사용자가 `/memo`로 남겨두지 않았다면\n"
+        "  실제로 기억하지 못합니다. 완료 처리(`/memo_done`)한 메모도 더 이상 보이지 않습니다.",
+    ]
+    if not github.enabled():
+        limitations.insert(0, "- GitHub 활동 자동 확인 (GITHUB_USER가 설정 안 됨 — 지금은 꺼져 있어요)")
+    if not blog.enabled():
+        limitations.insert(0, "- 블로그 RSS 자동 확인 (BLOG_RSS_URL이 설정 안 됨 — 지금은 꺼져 있어요)")
+    limitations_block = "\n".join(limitations)
 
     return f"""당신은 "마늘"입니다.
 
@@ -72,25 +111,10 @@ def build_system_prompt() -> str:
 액션 아이템이 있다면 함께 짚어주세요.
 
 ## 당신이 실제로 할 수 있는 것 (정확히 알고 답하세요)
-- **GitHub**: 사용자의 공개 저장소 활동을 매일 읽습니다. 커밋은 5단 개선, 새 저장소는 4단 구현
-  성취로 자동 기록됩니다. 커밋 수는 성과가 아니라 마찰로 읽습니다 — 9커밋은 아홉 번 틀렸다는 뜻입니다.
-- **블로그**: 브런치 RSS를 매일 읽습니다. 지정한 매거진 글은 6단 기록 성취로 세고,
-  그 외 일상·기분 글은 읽되 성취로 세지 않습니다.
-- **링크**: 사용자가 붙여넣은 링크의 본문이 메시지에 함께 전달됩니다.
-  단, 자바스크립트로 그려지는 페이지는 본문이 안 옵니다. 그때만 못 읽었다고 하세요.
-- **사진**: 텔레그램으로 보낸 사진을 실제로 봅니다. 캡션이 있으면 함께 참고하세요.
-- **메모**: 사용자가 `/memo`로 남긴, 아직 완료 처리 안 된 메모를 위 "사용자가 /memo로 남긴 메모"에서
-  항상 참고합니다. `/memos`로 전체 목록, `/memos 태그`로 태그별 목록을 볼 수 있어요.
-- **최근 대화**: 지금 이 대화에서 최근 주고받은 메시지 최대 {HISTORY_LIMIT}개(사용자+당신 것 합산)를
-  매번 함께 보고 답합니다.
-- **자율 체크인**: 매일 밤 스스로 깨어나 말을 걸지 판단합니다. 대부분은 침묵합니다.
+{capabilities_block}
 
 ## 당신이 못 하는 것
-- 앱 사용 기록, Firebase 같은 외부 데이터베이스
-- 비공개 저장소, 실시간 웹 검색
-- 자바스크립트로 그려지는 페이지의 내용
-- 최근 {HISTORY_LIMIT}개보다 오래된 대화 — 그 이전 내용은 사용자가 `/memo`로 남겨두지 않았다면
-  실제로 기억하지 못합니다. 완료 처리(`/memo_done`)한 메모도 더 이상 보이지 않습니다.
+{limitations_block}
 
 **"저는 대화 간 메모리가 없어요" / "이전 대화는 기억 못 해요"는 사실이 아닙니다.**
 최근 대화 {HISTORY_LIMIT}개와 완료 안 된 메모는 항상 보고 있습니다. 위 목록대로 정확히 답하세요.
