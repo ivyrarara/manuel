@@ -28,7 +28,7 @@ import logging
 import httpx
 
 from . import db
-from .config import GITHUB_USER
+from .config import GITHUB_EXCLUDE_REPOS, GITHUB_USER
 
 log = logging.getLogger("maneul.github")
 
@@ -156,6 +156,9 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
     push/merge 전부 (저장소, 날짜) 단위로 묶습니다 — 그날 커밋을 몇 번 하고
     PR을 몇 개 merge했든, 성취는 하루 1건입니다. merge_prs는 (저장소, 날짜) ->
     그날 merge된 PR 번호 목록(최신순)입니다.
+
+    GITHUB_EXCLUDE_REPOS에 있는 저장소는 아예 걸러냅니다 — 마늘 자기 자신을
+    고치는 건 사용자의 성장이 아니라 봇 정비이므로, 성취로 셀 대상이 아닙니다.
     """
     push_refs = collections.defaultdict(list)
     creates = {}
@@ -165,6 +168,8 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
         repo = (e.get("repo") or {}).get("name")
         created = e.get("created_at") or ""
         if not repo or not created:
+            continue
+        if repo.split("/")[-1] in GITHUB_EXCLUDE_REPOS:
             continue
         date = created[:10]
         etype = e.get("type")
