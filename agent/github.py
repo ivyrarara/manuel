@@ -153,16 +153,13 @@ def _pick_message(messages: list[str]) -> str:
 def _group_events(events: list) -> tuple[dict, dict, dict]:
     """이벤트를 종류별로 묶습니다 (API 호출 없이, 순수 분류만).
 
-    push는 (저장소, 날짜) 단위로 그날의 (before, head) SHA쌍들을 모읍니다 —
-    실제 커밋 개수·메시지는 여기서 알 수 없고, Compare API를 불러야 압니다.
-    merge(PR 병합)는 PR 번호 단위로 모읍니다. 같은 날 (저장소, 날짜) push 묶음이
-    이미 기록된 뒤에 또 다른 PR을 merge해도, push 쪽 dedup 키는 그날 하루로
-    고정돼 있어서 다시 안 잡힙니다. merge를 PR 번호로 독립적으로 추적해야
-    "그날 이미 뭔가 기록됐다"는 이유로 나중에 merge한 PR이 조용히 묻히지 않습니다.
+    push/merge 전부 (저장소, 날짜) 단위로 묶습니다 — 그날 커밋을 몇 번 하고
+    PR을 몇 개 merge했든, 성취는 하루 1건입니다. merge_prs는 (저장소, 날짜) ->
+    그날 merge된 PR 번호 목록(최신순)입니다.
     """
     push_refs = collections.defaultdict(list)
     creates = {}
-    merge_prs = {}
+    merge_prs = collections.defaultdict(list)
 
     for e in events:
         repo = (e.get("repo") or {}).get("name")
@@ -189,7 +186,7 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
                 pr = payload.get("pull_request") or {}
                 number = pr.get("number")
                 if number is not None:
-                    merge_prs[(repo, number)] = date
+                    merge_prs[(repo, date)].append(number)
 
     return push_refs, creates, merge_prs
 
@@ -197,7 +194,11 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
 async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
     """이벤트를 묶고, 부족한 정보(커밋 메시지·PR 제목)를 추가로 가져와 완성합니다.
 
-    반환: [{"key","repo","date","kind","commits","message"}...]
+    반환: [{"key","repo","date","kind","commits","message","merged_count"}...]
+
+    (저장소, 날짜) 단위로 최대 1건만 만듭니다 — 커밋을 몇 번 하고 PR을 몇 개
+    merge했든 그날의 성취는 1건입니다. 그날 merge된 PR이 있으면 제목을
+    최우선으로 씁니다(가장 설명적이니까). 없으면 커밋 메시지 중에서 고릅니다.
     """
     push_refs, creates, merge_prs = _group_events(events)
 
@@ -205,14 +206,14 @@ async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
     for (repo, date) in creates:
         items.append({
             "key": f"create:{repo}:{date}", "repo": repo, "date": date,
-            "kind": "create", "commits": 0, "message": "",
+            "kind": "create", "commits": 0, "message": "", "merged_count": 0,
         })
 
-    for (repo, date), refs in push_refs.items():
+    for (repo, date) in set(push_refs) | set(merge_prs):
         messages: list[str] = []
         commit_count = 0
         lookup_failed = False
-        for before, head in refs:
+        for before, head in push_refs.get((repo, date), []):
             result = await _fetch_compare_commits(client, repo, before, head)
             if result is None:
                 # Compare API 실패 — 몰라도 최소 1건은 있었다고 침. 실제 작업을
@@ -222,18 +223,20 @@ async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
             else:
                 commit_count += len(result)
                 messages += result
-        if commit_count == 0 and not lookup_failed:
-            continue  # before == head뿐이었던, 확실히 새 커밋 없는 푸시
+
+        pr_titles = []
+        for number in merge_prs.get((repo, date), []):
+            title = await _fetch_pr_title(client, repo, number)
+            pr_titles.append(title or f"PR #{number}")
+
+        if commit_count == 0 and not lookup_failed and not pr_titles:
+            continue  # before == head뿐이었던, 확실히 새 커밋도 merge도 없던 날
+
+        message = pr_titles[0] if pr_titles else _pick_message(messages)
         items.append({
             "key": f"push:{repo}:{date}", "repo": repo, "date": date,
-            "kind": "push", "commits": commit_count, "message": _pick_message(messages),
-        })
-
-    for (repo, number), date in merge_prs.items():
-        title = await _fetch_pr_title(client, repo, number)
-        items.append({
-            "key": f"merge:{repo}:{number}", "repo": repo, "date": date,
-            "kind": "merge", "commits": 0, "message": title or f"PR #{number}",
+            "kind": "push", "commits": commit_count, "message": message,
+            "merged_count": len(pr_titles),
         })
 
     return sorted(items, key=lambda i: i["date"])
@@ -251,9 +254,11 @@ def _describe(item: dict) -> tuple[str, int]:
     if item["kind"] == "create":
         return f"새 저장소 만듦: {short}", 4  # 구현
 
-    if item["kind"] == "merge":
+    if item.get("merged_count"):
         # PR 제목은 _digest에서 이미 항상 채워서 넘깁니다 (없으면 "PR #N"으로 대체).
-        return f"{short} PR 병합 — {item['message']}", 5  # 개선
+        # 하루에 여러 PR을 merge해도 성취는 1건이라, 개수만 살짝 표시합니다.
+        count = f" ({item['merged_count']}건 병합)" if item["merged_count"] > 1 else ""
+        return f"{short} PR 병합{count} — {item['message']}", 5  # 개선
 
     detail = f" — {item['message']}" if item["message"] else ""
     friction = f" ({item['commits']}번 만에)" if item["commits"] > 2 else ""
