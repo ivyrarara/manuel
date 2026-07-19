@@ -599,6 +599,17 @@ async def github_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+@owner_only
+async def github_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """일회성 정리 명령어. 과거 GitHub 동기화 버그로 잘못 쌓인 성취를 바로잡습니다."""
+    result = db.cleanup_github_achievements()
+    await update.message.reply_text(
+        "정리했어요.\n"
+        f"· manuel 관련 성취 {result['removed_manuel']}건 삭제\n"
+        f"· 중복 기록된 성취 {result['merged']}건을 하나로 합침"
+    )
+
+
 async def job_github(context: ContextTypes.DEFAULT_TYPE):
     """체크인 전에 GitHub을 읽어둡니다. 오늘 커밋이 오늘 판단에 반영되도록."""
     if not github.enabled():
@@ -711,6 +722,7 @@ def main():
     app.add_handler(CommandHandler("pace", pace))
     app.add_handler(CommandHandler("blog", blog_check))
     app.add_handler(CommandHandler("github", github_check))
+    app.add_handler(CommandHandler("github_cleanup", github_cleanup))
     app.add_handler(CommandHandler("reclassify", reclassify))
     app.add_handler(CommandHandler("checkin", checkin_now))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))

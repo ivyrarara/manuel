@@ -6,7 +6,9 @@ SQLite의 datetime('now')는 UTC를 반환하기 때문에, 그걸 Python의 로
 
 checkins 테이블이 이 프로젝트의 자산입니다. 코드가 아니라 이 테이블을 들고 갑니다.
 """
+import collections
 import hashlib
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 
@@ -569,6 +571,57 @@ def achievements_since(days: int) -> list[sqlite3.Row]:
             "where type = 'achievement' and created_at >= ? order by created_at",
             (_cutoff(days),),
         ).fetchall()
+
+
+# GitHub 성취 문구는 항상 "{저장소} 개선..." 또는 "{저장소} PR 병합..."으로 시작합니다
+# (agent/github.py의 _describe). 블로그·대화 성취와 구분해서 정리 대상만 골라냅니다.
+_GITHUB_ACHIEVEMENT_RE = re.compile(r"^(\S+) (개선|PR 병합)")
+
+
+def cleanup_github_achievements() -> dict:
+    """일회성 정리 — 과거 GitHub 동기화 버그로 잘못 쌓인 성취를 바로잡습니다.
+
+    1) manuel(마늘 자기 자신 저장소) 관련 성취는 전부 삭제합니다. 마늘을 고치는 건
+       사용자의 성장이 아니라 봇 정비라 애초에 성취가 아니었습니다.
+    2) "하루 1건" 규칙이 생기기 전에 같은 (저장소, 날짜)로 여러 건 쪼개져 기록된
+       GitHub 성취는 하나로 합칩니다 — PR 병합이 있으면 그 문구를 남기고, 여러 건
+       병합됐으면 "(N건 병합)"을 붙입니다.
+    """
+    with connect() as conn:
+        removed_manuel = conn.execute(
+            "delete from insights where type = 'achievement' and text like 'manuel %'"
+        ).rowcount
+
+        rows = conn.execute(
+            "select id, text, created_at from insights where type = 'achievement' order by created_at"
+        ).fetchall()
+
+        groups = collections.defaultdict(list)
+        for r in rows:
+            m = _GITHUB_ACHIEVEMENT_RE.match(r["text"])
+            if m:
+                groups[(m.group(1), r["created_at"][:10])].append(r)
+
+        merged = 0
+        for (repo, date_str), items in groups.items():
+            if len(items) <= 1:
+                continue
+            merges = [i for i in items if re.match(r"^\S+ PR 병합", i["text"])]
+            # 예전 버그 있던 동기화는 GitHub API가 최신순으로 준 이벤트를 그 순서
+            # 그대로 처리해서 기록했습니다 — 즉 가장 최근에 merge된 PR이 DB에는
+            # 가장 먼저(=created_at이 가장 이른) 들어가 있습니다. 그래서 여기서도
+            # merges[0](가장 이른 created_at)이 실제로는 가장 나중에 merge된 PR입니다.
+            keep = merges[0] if merges else items[-1]
+            text = keep["text"]
+            if len(merges) > 1 and "건 병합" not in text:
+                text = re.sub(r" PR 병합(\s*—|$)", f" PR 병합 ({len(merges)}건 병합)\\1", text, count=1)
+            conn.execute("update insights set text = ? where id = ?", (text, keep["id"]))
+            for i in items:
+                if i["id"] != keep["id"]:
+                    conn.execute("delete from insights where id = ?", (i["id"],))
+                    merged += 1
+
+    return {"removed_manuel": removed_manuel, "merged": merged}
 
 
 def weekly_depth(weeks: int) -> list[dict]:
