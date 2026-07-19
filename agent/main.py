@@ -589,13 +589,12 @@ async def github_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\n저장소:")
         lines += [f"· {r}" for r in repos]
 
-    if result.get("first_run"):
-        lines.append(f"\n과거 활동 {len(result['new'])}건은 성취로 세지 않았어요.")
-        lines.append("지금부터의 커밋이 5단 개선 성취로 잡혀요.")
-    elif result["recorded"]:
+    if result["recorded"]:
         lines.append("\n새 활동을 성취로 기록했어요:")
         lines += [f"🧄 {t}" for t in result["recorded"]]
-    else:
+    if result.get("backlog"):
+        lines.append(f"\n(그중 {result['backlog']}건은 100일 시작 전 활동이라 성취로 세지 않았어요.)")
+    if not result["recorded"] and not result.get("backlog"):
         lines.append("\n새 활동은 없어요.")
     await update.message.reply_text("\n".join(lines))
 
