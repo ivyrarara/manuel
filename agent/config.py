@@ -62,6 +62,11 @@ MONDAY_ACTIONS = (MONDAY, 10, 0)  # 월요일 10:00 — 이번 주 액션 아이
 # 안 그러면 메시지 두 개가 동시에 도착합니다. ("잦은 알림 금지")
 CHECKIN_DAYS = (1, 2, 3, 4, 5, 6)  # 월~토
 
+# DB 자동 백업: 매월 이 날 이 시각에 maneul.db 전체를 텔레그램으로 보냅니다.
+# Railway 볼륨이 유일본이라, 볼륨이 날아가면 100일치 기록이 전부 사라집니다.
+BACKUP_DAY = 1
+BACKUP_HOUR, BACKUP_MINUTE = 9, 0
+
 BACKGROUND = """\
 - 디자인전략기획 2년
 - 이마트에서 PL 패키지 디자인 2년
