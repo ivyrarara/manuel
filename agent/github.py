@@ -4,6 +4,13 @@ Events API를 씁니다: https://api.github.com/users/{user}/events/public
 호출 한 번으로 **모든 공개 저장소**의 활동이 다 옵니다. 저장소를 하나하나
 등록할 필요가 없어서, 100일 동안 새 앱을 만들어도 설정을 안 바꿔도 됩니다.
 
+⚠️ Events API의 PushEvent.payload는 더 이상 commits 배열을 안 줍니다(GitHub이
+제거했습니다). before/head SHA만 오므로, 실제 커밋 개수·메시지는 Compare API
+(`/repos/{repo}/compare/{before}...{head}`)로 따로 가져와야 합니다.
+PullRequestEvent.payload.pull_request도 축약판이라 title이 없어서, PR 병합은
+`/repos/{repo}/pulls/{number}`을 따로 불러 제목을 가져옵니다. 이 두 개를 몰랐던
+채로 짜면 이벤트는 받아오면서도 실제 활동은 전부 0건으로 보입니다.
+
 인플레이션 방지: 하루에 커밋을 9번 해도 **성취는 1건**입니다.
 커밋 수를 세면 숫자만 예뻐집니다. 사다리는 깊이를 재지 횟수를 재지 않습니다.
 
@@ -12,9 +19,9 @@ Events API를 씁니다: https://api.github.com/users/{user}/events/public
 그래서 커밋 수는 성취의 크기가 아니라 그날의 고생을 나타내는 값으로 씁니다.
 
 한계: Events API는 최근 ~90일, 300개까지만 보관합니다. 하루 한 번 도는 데는 충분합니다.
-인증 없이 시간당 60회 — 하루 1~2회 호출이면 여유롭습니다.
+인증 없이 시간당 60회 — 이벤트 조회 1회 + 그날 푸시/병합 건수만큼 추가 호출이 붙지만,
+하루 1~2회 도는 데는 충분히 여유롭습니다.
 """
-import asyncio
 import collections
 import logging
 
@@ -26,6 +33,7 @@ from .config import GITHUB_USER
 log = logging.getLogger("maneul.github")
 
 API = "https://api.github.com/users/{user}/events/public"
+HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "maneul-agent"}
 TIMEOUT = 15
 
 
@@ -33,19 +41,14 @@ def enabled() -> bool:
     return bool(GITHUB_USER)
 
 
-async def fetch_events() -> dict:
+async def fetch_events(client: httpx.AsyncClient) -> dict:
     """반환: {"ok": bool, "error": str|None, "events": [...]}"""
     if not enabled():
         return {"ok": False, "error": "GITHUB_USER가 설정되지 않았어요.", "events": []}
 
     url = API.format(user=GITHUB_USER)
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.get(
-                url,
-                params={"per_page": 100},
-                headers={"Accept": "application/vnd.github+json", "User-Agent": "maneul-agent"},
-            )
+        r = await client.get(url, params={"per_page": 100}, headers=HEADERS)
     except Exception as e:
         return {"ok": False, "error": f"GitHub에 연결하지 못했어요: {e}", "events": []}
 
@@ -66,6 +69,39 @@ async def fetch_events() -> dict:
         return {"ok": False, "error": "GitHub 응답 형식이 예상과 달라요.", "events": []}
 
     return {"ok": True, "error": None, "events": events}
+
+
+async def _fetch_compare_commits(
+    client: httpx.AsyncClient, repo: str, before: str, head: str
+) -> list[str] | None:
+    """이 푸시로 새로 들어온 커밋 메시지들. 실패하면 None(있었다는 것만 알고 내용은 모름).
+
+    before == head면 새 커밋이 없는 푸시(태그 이동 등)이므로 빈 리스트를 바로 반환합니다.
+    """
+    if not before or not head or before == head:
+        return []
+    url = f"https://api.github.com/repos/{repo}/compare/{before}...{head}"
+    try:
+        r = await client.get(url, headers=HEADERS)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except Exception:
+        return None
+    commits = data.get("commits") or []
+    return [c.get("commit", {}).get("message", "") for c in commits if c.get("commit")]
+
+
+async def _fetch_pr_title(client: httpx.AsyncClient, repo: str, number: int) -> str | None:
+    """PullRequestEvent에는 제목이 없어서 PR 상세를 따로 불러옵니다. 실패하면 None."""
+    url = f"https://api.github.com/repos/{repo}/pulls/{number}"
+    try:
+        r = await client.get(url, headers=HEADERS)
+        if r.status_code != 200:
+            return None
+        return (r.json().get("title") or "").strip() or None
+    except Exception:
+        return None
 
 
 # GitHub 웹 업로드가 자동으로 붙이는 문구들. 성취 문구로 쓰면 아무 의미가 없습니다.
@@ -114,18 +150,19 @@ def _pick_message(messages: list[str]) -> str:
     return ""
 
 
-def _digest(events: list) -> list[dict]:
-    """이벤트를 묶습니다. 반환: [{"key","repo","date","kind","commits","message"}...]
+def _group_events(events: list) -> tuple[dict, dict, dict]:
+    """이벤트를 종류별로 묶습니다 (API 호출 없이, 순수 분류만).
 
-    push/create는 (저장소, 날짜) 단위 — 하루 9커밋도 성취 1건.
-    merge(PR 병합)는 PR 번호 단위로 따로 묶습니다. 같은 날 (저장소, 날짜) 묶음이
+    push는 (저장소, 날짜) 단위로 그날의 (before, head) SHA쌍들을 모읍니다 —
+    실제 커밋 개수·메시지는 여기서 알 수 없고, Compare API를 불러야 압니다.
+    merge(PR 병합)는 PR 번호 단위로 모읍니다. 같은 날 (저장소, 날짜) push 묶음이
     이미 기록된 뒤에 또 다른 PR을 merge해도, push 쪽 dedup 키는 그날 하루로
     고정돼 있어서 다시 안 잡힙니다. merge를 PR 번호로 독립적으로 추적해야
     "그날 이미 뭔가 기록됐다"는 이유로 나중에 merge한 PR이 조용히 묻히지 않습니다.
     """
-    pushes = collections.defaultdict(lambda: {"commits": 0, "messages": []})
+    push_refs = collections.defaultdict(list)
     creates = {}
-    merges = {}
+    merge_prs = {}
 
     for e in events:
         repo = (e.get("repo") or {}).get("name")
@@ -134,26 +171,35 @@ def _digest(events: list) -> list[dict]:
             continue
         date = created[:10]
         etype = e.get("type")
+        payload = e.get("payload") or {}
 
         if etype == "PushEvent":
-            commits = (e.get("payload") or {}).get("commits") or []
-            bucket = pushes[(repo, date)]
-            bucket["commits"] += len(commits)
-            bucket["messages"] += [c.get("message", "") for c in commits if c.get("message")]
+            before, head = payload.get("before"), payload.get("head")
+            if before and head:
+                push_refs[(repo, date)].append((before, head))
 
         elif etype == "CreateEvent":
-            if (e.get("payload") or {}).get("ref_type") == "repository":
+            if payload.get("ref_type") == "repository":
                 creates[(repo, date)] = True
 
         elif etype == "PullRequestEvent":
-            payload = e.get("payload") or {}
-            pr = payload.get("pull_request") or {}
-            number = pr.get("number")
-            if payload.get("action") == "closed" and pr.get("merged") and number is not None:
-                merges[(repo, number)] = {
-                    "title": (pr.get("title") or f"PR #{number}").strip(),
-                    "date": (pr.get("merged_at") or created)[:10],
-                }
+            # Events API는 병합을 action="merged"로 줍니다 (webhook의
+            # action="closed" + pull_request.merged=true 형태가 아닙니다).
+            if payload.get("action") == "merged":
+                pr = payload.get("pull_request") or {}
+                number = pr.get("number")
+                if number is not None:
+                    merge_prs[(repo, number)] = date
+
+    return push_refs, creates, merge_prs
+
+
+async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
+    """이벤트를 묶고, 부족한 정보(커밋 메시지·PR 제목)를 추가로 가져와 완성합니다.
+
+    반환: [{"key","repo","date","kind","commits","message"}...]
+    """
+    push_refs, creates, merge_prs = _group_events(events)
 
     items = []
     for (repo, date) in creates:
@@ -161,17 +207,33 @@ def _digest(events: list) -> list[dict]:
             "key": f"create:{repo}:{date}", "repo": repo, "date": date,
             "kind": "create", "commits": 0, "message": "",
         })
-    for (repo, date), b in pushes.items():
-        if not b["commits"]:
-            continue
+
+    for (repo, date), refs in push_refs.items():
+        messages: list[str] = []
+        commit_count = 0
+        lookup_failed = False
+        for before, head in refs:
+            result = await _fetch_compare_commits(client, repo, before, head)
+            if result is None:
+                # Compare API 실패 — 몰라도 최소 1건은 있었다고 침. 실제 작업을
+                # "조회 실패"라는 이유로 0건 처리해버리면 안 됩니다.
+                lookup_failed = True
+                commit_count += 1
+            else:
+                commit_count += len(result)
+                messages += result
+        if commit_count == 0 and not lookup_failed:
+            continue  # before == head뿐이었던, 확실히 새 커밋 없는 푸시
         items.append({
             "key": f"push:{repo}:{date}", "repo": repo, "date": date,
-            "kind": "push", "commits": b["commits"], "message": _pick_message(b["messages"]),
+            "kind": "push", "commits": commit_count, "message": _pick_message(messages),
         })
-    for (repo, number), m in merges.items():
+
+    for (repo, number), date in merge_prs.items():
+        title = await _fetch_pr_title(client, repo, number)
         items.append({
-            "key": f"merge:{repo}:{number}", "repo": repo, "date": m["date"],
-            "kind": "merge", "commits": 0, "message": m["title"],
+            "key": f"merge:{repo}:{number}", "repo": repo, "date": date,
+            "kind": "merge", "commits": 0, "message": title or f"PR #{number}",
         })
 
     return sorted(items, key=lambda i: i["date"])
@@ -201,30 +263,40 @@ def _describe(item: dict) -> tuple[str, int]:
 async def sync() -> dict:
     """새 활동을 성취로 기록.
 
-    첫 실행은 과거 활동을 성취로 세지 않습니다 — 오늘 성취로 넣으면
-    페이스 차트가 1일차부터 거짓말이 됩니다.
+    100일 시작일 이전 활동은 성취로 세지 않습니다 — 그걸 오늘 성취로 넣으면
+    페이스 차트가 1일차부터 거짓말이 됩니다. 반대로 시작일 이후 활동은, 이번이
+    이 계정에 대한 사상 첫 동기화라도(= 방금 GITHUB_USER를 연결했어도) 이미
+    챌린지 안에서 일어난 진짜 활동이므로 곧바로 성취로 셉니다 — "첫 동기화는
+    과거 기록 취급"이라는 규칙이 오늘 한 일까지 묻어버리면 안 됩니다.
     """
     first_run = db.github_activity_count() == 0
-    result = await fetch_events()
-    if not result["ok"]:
-        return {**result, "new": [], "recorded": []}
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        result = await fetch_events(client)
+        if not result["ok"]:
+            return {**result, "new": [], "recorded": []}
+        items = await _digest(client, result["events"])
 
-    items = _digest(result["events"])
     new = [i for i in items if not db.github_activity_exists(i["key"])]
 
     for i in new:
         db.add_github_activity(i["key"], i["repo"], i["date"], i["commits"])
 
-    if first_run:
-        log.info("GitHub 첫 동기화: 과거 활동 %d건을 성취로 세지 않고 넘어감", len(new))
-        return {**result, "new": new, "recorded": [], "first_run": True, "total": len(items)}
+    start = db.start_date_str()
+    countable = [i for i in new if i["date"] >= start]
+    backlog = len(new) - len(countable)
 
     recorded = []
-    for i in new:
+    for i in countable:
         text, depth = _describe(i)
         db.add_achievement(text, depth=depth)
         recorded.append(text)
 
+    if backlog:
+        log.info("GitHub 활동 %d건은 시작일(%s) 이전 기록이라 성취로 세지 않음", backlog, start)
     if recorded:
         log.info("GitHub 활동 %d건을 성취로 기록", len(recorded))
-    return {**result, "new": new, "recorded": recorded, "first_run": False, "total": len(items)}
+
+    return {
+        **result, "new": new, "recorded": recorded,
+        "backlog": backlog, "first_run": first_run, "total": len(items),
+    }

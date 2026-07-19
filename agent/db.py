@@ -212,6 +212,13 @@ def _start_date() -> date:
     return date.fromisoformat(row["value"]) if row else _today()
 
 
+def start_date_str() -> str:
+    """100일 시작일 (YYYY-MM-DD). 외부 활동(GitHub 등)을 시작일 이전/이후로
+    가를 때 씁니다 — 시작일 이후는 그 연동을 방금 켰어도 챌린지 안에서 일어난
+    진짜 활동이니 "과거 기록이라 안 셈"으로 묻히면 안 됩니다."""
+    return _start_date().isoformat()
+
+
 def day_number() -> int:
     """Day N. 사용자가 있는 곳의 날짜 기준입니다.
 
