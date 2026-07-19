@@ -8,6 +8,7 @@
 실행: python -m agent.main
 """
 import logging
+import os
 import re
 from collections import deque
 from datetime import time as dtime
@@ -22,6 +23,7 @@ from telegram.ext import (
 
 from . import blog, brain, checkin, db, github
 from .config import (
+    BACKUP_DAY, BACKUP_HOUR, BACKUP_MINUTE,
     BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, CHECKIN_HOUR, CHECKIN_MINUTE,
     GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE, GITHUB_USER,
     FEEDBACK_LABELS, FEEDBACK_OPTIONS, MONDAY_ACTIONS, OWNER_CHAT_ID,
@@ -398,6 +400,46 @@ async def data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def _send_backup(bot, caption: str):
+    """DB 백업 파일을 만들어 전송하고 지웁니다. 실패해도 조용히 죽지 않습니다.
+
+    checkins 테이블(판단 원문·대화·성취·메모 전부)이 Railway 볼륨 한 곳에만
+    있는 유일본이라, 이게 실패했는데 아무도 모르면 100일치가 통째로 위험해집니다.
+    """
+    path = None
+    try:
+        path = db.create_backup_copy()
+        filename = f"maneul-backup-{db.today_str()}.db"
+        with open(path, "rb") as f:
+            await bot.send_document(
+                chat_id=OWNER_CHAT_ID, document=f, filename=filename, caption=caption,
+            )
+    except Exception:
+        log.exception("DB 백업 전송 실패")
+        await bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text="⚠️ 백업 전송에 실패했어요. 잠시 후 /backup 으로 다시 시도해주세요.",
+        )
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+@owner_only
+async def backup_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """수동 백업. 아무 때나 지금 상태의 DB 파일을 받습니다."""
+    await _send_backup(context.bot, "지금 상태의 백업이에요. 폰에 저장해두세요.")
+
+
+async def job_backup(context: ContextTypes.DEFAULT_TYPE):
+    """매월 자동 백업."""
+    month = int(db.today_str()[5:7])
+    await _send_backup(context.bot, f"{month}월 백업이에요. 폰에 저장해두세요.")
+
+
 @owner_only
 async def checkin_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """체크인 판단을 지금 강제로 돌려봄. 침묵을 골라도 이유와 삼킨 말을 보여줍니다."""
@@ -719,6 +761,7 @@ def main():
     app.add_handler(CommandHandler("memo_done", memo_done))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("data", data))
+    app.add_handler(CommandHandler("backup", backup_now))
     app.add_handler(CommandHandler("pace", pace))
     app.add_handler(CommandHandler("blog", blog_check))
     app.add_handler(CommandHandler("github", github_check))
@@ -746,6 +789,8 @@ def main():
 
     weekday, hour, minute = MONDAY_ACTIONS
     jq.run_daily(job_monday_actions, time=dtime(hour, minute, tzinfo=TZ), days=(weekday,))
+
+    jq.run_monthly(job_backup, when=dtime(BACKUP_HOUR, BACKUP_MINUTE, tzinfo=TZ), day=BACKUP_DAY)
 
     log.info("마늘 시작. Day %s / %s", db.day_number(), TOTAL_DAYS)
 
