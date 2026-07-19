@@ -27,6 +27,13 @@ BLOG_MAGAZINE_SLUG = os.getenv("BLOG_MAGAZINE_SLUG", "designer-renew").strip()
 GITHUB_USER = os.getenv("GITHUB_USER", "").strip()
 GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE = 18, 40  # 체크인 20분 전에 오늘 커밋을 반영
 
+# 성취 집계에서 뺄 저장소들 (쉼표 구분, owner 없이 저장소 이름만). 기본값은 마늘
+# 자기 자신의 소스코드 저장소입니다 — 마늘을 고치는 건 사용자의 성장이 아니라
+# 봇 정비라서, 100일 페이스 기록에 섞이면 안 됩니다.
+GITHUB_EXCLUDE_REPOS = {
+    r.strip() for r in os.getenv("GITHUB_EXCLUDE_REPOS", "manuel").split(",") if r.strip()
+}
+
 MODEL = "claude-sonnet-4-6"
 # 사용자가 실제로 있는 곳 기준. 모든 스케줄과 저장 시각이 여기 맞춰집니다.
 # 한국으로 돌아가면 이 값 하나만 Asia/Seoul 로 바꾸면 됩니다.
