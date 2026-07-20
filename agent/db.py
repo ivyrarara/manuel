@@ -7,6 +7,7 @@ SQLite의 datetime('now')는 UTC를 반환하기 때문에, 그걸 Python의 로
 checkins 테이블이 이 프로젝트의 자산입니다. 코드가 아니라 이 테이블을 들고 갑니다.
 """
 import collections
+import contextlib
 import hashlib
 import os
 import re
@@ -127,11 +128,25 @@ def _today() -> date:
     return datetime.now(TZ).date()
 
 
+@contextlib.contextmanager
 def connect():
+    """`with connect() as conn:` 하나로 트랜잭션 정리와 연결 종료를 둘 다 보장합니다.
+
+    sqlite3.Connection을 그냥 `with`에 넣으면 트랜잭션만 커밋/롤백되고 연결
+    자체는 안 닫힙니다(표준 DB-API 컨텍스트 매니저와 다른, sqlite3의 문서화된
+    동작). 매 호출마다 새 연결을 열고 GC에 닫기를 맡기면, job queue와 메시지
+    핸들러가 같은 파일 DB를 동시에 건드릴 때 "database is locked"의
+    원인이 될 수 있습니다. 여기서 한 번만 고치면 파일 전체의 `with connect()`
+    호출부는 전혀 안 바꿔도 됩니다.
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("pragma foreign_keys = on")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_columns(conn):
