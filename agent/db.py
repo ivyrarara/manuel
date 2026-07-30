@@ -85,6 +85,7 @@ create table if not exists checkins (
     raw_input      text,          -- 판단의 입력 원문 (그때 마늘이 본 것 전부)
     feedback       text,          -- 탭으로 받은 채점 결과
     feedback_at    text,
+    needs_feedback integer not null default 1,  -- 판단/지적이라 채점 버튼이 필요한가 (안부·공감이면 0)
     created_at     text not null
 );
 
@@ -170,6 +171,7 @@ def _ensure_columns(conn):
             ("raw_input", "text"),
             ("feedback", "text"),
             ("feedback_at", "text"),
+            ("needs_feedback", "integer not null default 1"),
         ],
         "insights": [
             ("depth", "integer"),
@@ -496,20 +498,25 @@ def log_checkin(
     unspoken: str | None,
     prompt_version: str,
     raw_input: str | None = None,
+    needs_feedback: bool = True,
 ) -> int:
     """판단을 기록합니다.
 
     raw_input에는 그때 마늘이 본 것 전부가 들어갑니다. 판단만 남기면
     나중에 "v4가 v1보다 낫다"를 증명할 수 없습니다 — 같은 입력에 두 버전을
     돌려봐야 하는데 입력이 없으니까요. 원칙: 판단 전에 먼저 기록.
+
+    needs_feedback: 이 말이 판단/지적이라 채점 버튼이 필요한가. 안부·공감
+    메시지나 침묵에는 false — 채점 버튼이 어색하니까요.
     """
     with connect() as conn:
         cur = conn.execute(
             "insert into checkins "
-            "(spoke, trigger, confidence, reason, message, unspoken, prompt_version, raw_input, created_at) "
-            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(spoke, trigger, confidence, reason, message, unspoken, prompt_version, raw_input, "
+            " needs_feedback, created_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (int(spoke), trigger, confidence, reason, message, unspoken,
-             prompt_version, raw_input, _now()),
+             prompt_version, raw_input, int(needs_feedback), _now()),
         )
         return cur.lastrowid
 
