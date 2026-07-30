@@ -62,8 +62,9 @@ async def fetch_events(client: httpx.AsyncClient) -> dict:
 
     try:
         events = r.json()
-    except Exception:
-        return {"ok": False, "error": "GitHub 응답을 읽지 못했어요.", "events": []}
+    except Exception as e:
+        log.warning("GitHub 응답을 읽지 못했어요: %s", e)
+        return {"ok": False, "error": f"GitHub 응답을 읽지 못했어요: {e}", "events": []}
 
     if not isinstance(events, list):
         return {"ok": False, "error": "GitHub 응답 형식이 예상과 달라요.", "events": []}

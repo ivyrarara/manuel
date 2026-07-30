@@ -443,9 +443,10 @@ async def job_backup(context: ContextTypes.DEFAULT_TYPE):
 @owner_only
 async def checkin_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """체크인 판단을 지금 강제로 돌려봄. 침묵을 골라도 이유와 삼킨 말을 보여줍니다."""
-    async def send(msg, checkin_id):
+    async def send(msg, checkin_id, needs_feedback):
         await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID, text=msg, reply_markup=feedback_keyboard(checkin_id)
+            chat_id=OWNER_CHAT_ID, text=msg,
+            reply_markup=feedback_keyboard(checkin_id) if needs_feedback else None,
         )
 
     decision = await checkin.run(send)
@@ -673,9 +674,10 @@ async def job_github(context: ContextTypes.DEFAULT_TYPE):
 # ---------- 스케줄 작업 ----------
 
 async def job_checkin(context: ContextTypes.DEFAULT_TYPE):
-    async def send(msg, checkin_id):
+    async def send(msg, checkin_id, needs_feedback):
         await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID, text=msg, reply_markup=feedback_keyboard(checkin_id)
+            chat_id=OWNER_CHAT_ID, text=msg,
+            reply_markup=feedback_keyboard(checkin_id) if needs_feedback else None,
         )
 
     try:
