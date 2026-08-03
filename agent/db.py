@@ -86,6 +86,7 @@ create table if not exists checkins (
     feedback       text,          -- 탭으로 받은 채점 결과
     feedback_at    text,
     needs_feedback integer not null default 1,  -- 판단/지적이라 채점 버튼이 필요한가 (안부·공감이면 0)
+    reflection     integer not null default 0,  -- 관찰-거울-열린질문 형식의 성찰 질문인가 (드물어야 함)
     created_at     text not null
 );
 
@@ -172,6 +173,7 @@ def _ensure_columns(conn):
             ("feedback", "text"),
             ("feedback_at", "text"),
             ("needs_feedback", "integer not null default 1"),
+            ("reflection", "integer not null default 0"),
         ],
         "insights": [
             ("depth", "integer"),
@@ -499,6 +501,7 @@ def log_checkin(
     prompt_version: str,
     raw_input: str | None = None,
     needs_feedback: bool = True,
+    reflection: bool = False,
 ) -> int:
     """판단을 기록합니다.
 
@@ -506,17 +509,18 @@ def log_checkin(
     나중에 "v4가 v1보다 낫다"를 증명할 수 없습니다 — 같은 입력에 두 버전을
     돌려봐야 하는데 입력이 없으니까요. 원칙: 판단 전에 먼저 기록.
 
-    needs_feedback: 이 말이 판단/지적이라 채점 버튼이 필요한가. 안부·공감
-    메시지나 침묵에는 false — 채점 버튼이 어색하니까요.
+    needs_feedback: 이 말이 판단/지적이라 채점 버튼이 필요한가. 안부·공감이나
+    성찰 질문에는 false — 채점 버튼이 어색하니까요.
+    reflection: 관찰을 거울처럼 비추고 열린 질문을 던지는 성찰 질문 형식인가.
     """
     with connect() as conn:
         cur = conn.execute(
             "insert into checkins "
             "(spoke, trigger, confidence, reason, message, unspoken, prompt_version, raw_input, "
-            " needs_feedback, created_at) "
-            "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " needs_feedback, reflection, created_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (int(spoke), trigger, confidence, reason, message, unspoken,
-             prompt_version, raw_input, int(needs_feedback), _now()),
+             prompt_version, raw_input, int(needs_feedback), int(reflection), _now()),
         )
         return cur.lastrowid
 
@@ -556,10 +560,20 @@ def raw_coverage() -> dict:
 def recent_checkins(limit: int = 5) -> list[sqlite3.Row]:
     with connect() as conn:
         return conn.execute(
-            "select id, spoke, trigger, confidence, reason, message, feedback, created_at "
+            "select id, spoke, trigger, confidence, reason, message, feedback, reflection, created_at "
             "from checkins order by id desc limit ?",
             (limit,),
         ).fetchall()
+
+
+def reflection_count_since(days: int) -> int:
+    """최근 며칠간 성찰 질문을 몇 번 던졌나. 마늘이 스스로 빈도를 절제하기 위한 참고값."""
+    with connect() as conn:
+        row = conn.execute(
+            "select count(*) as n from checkins where reflection = 1 and created_at >= ?",
+            (_cutoff(days),),
+        ).fetchone()
+        return row["n"]
 
 
 def set_feedback(checkin_id: int, feedback: str) -> bool:
