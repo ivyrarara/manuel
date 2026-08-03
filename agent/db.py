@@ -576,6 +576,20 @@ def reflection_count_since(days: int) -> int:
         return row["n"]
 
 
+def days_since_last_reflection() -> int | None:
+    """마지막 성찰 질문 이후 며칠 지났나. 아직 한 번도 없었으면 None.
+
+    빈도 제한(REFLECTION_MIN_GAP_DAYS)을 코드로 강제하기 위한 값입니다.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "select created_at from checkins where reflection = 1 order by id desc limit 1"
+        ).fetchone()
+    if not row:
+        return None
+    return days_since(row["created_at"])
+
+
 def set_feedback(checkin_id: int, feedback: str) -> bool:
     with connect() as conn:
         cur = conn.execute(
