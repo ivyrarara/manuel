@@ -117,6 +117,15 @@ LADDER = {
 PACE_WINDOW_WEEKS = 4
 PACE_SHALLOW_DEPTH = 3
 
+# 성찰 질문 빈도 제한 — 프롬프트에만 맡기면 모델이 어길 수 있어서, checkin.py가
+# 아래 두 값을 모델 호출 전/후에 코드로 직접 강제합니다.
+# 마지막 성찰 질문 이후 이만큼 날이 지나야 다시 후보가 됩니다.
+REFLECTION_MIN_GAP_DAYS = 14
+# 이 기간(일) 동안의 성취·GitHub 활동일을 합쳐 이 개수 이상일 때만 후보가 됩니다.
+# 데이터가 얇으면 패턴을 지어내게 되므로, 아예 시도 자체를 막습니다.
+REFLECTION_WINDOW_DAYS = 30
+REFLECTION_MIN_DATA_POINTS = 10
+
 # 발화 방아쇠 — 어떤 이유로 입을 열었는지 분류. 100일 뒤 이게 분석의 축이 됩니다.
 TRIGGERS = {
     "avoidance": "회피 — 특정 주제를 계속 겉돌고 있음",

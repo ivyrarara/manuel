@@ -10,12 +10,16 @@
 100일 뒤 이 기록이 자산이 되려면, 채점이 가능한 형태여야 합니다.
 """
 import json
+import logging
 
 from . import brain, db
 from .config import (
     BACKGROUND, HISTORY_LIMIT, LADDER, PACE_SHALLOW_DEPTH,
-    PACE_WINDOW_WEEKS, TOTAL_DAYS, TRIGGERS,
+    PACE_WINDOW_WEEKS, REFLECTION_MIN_DATA_POINTS, REFLECTION_MIN_GAP_DAYS,
+    REFLECTION_WINDOW_DAYS, TOTAL_DAYS, TRIGGERS,
 )
+
+log = logging.getLogger(__name__)
 
 # 답이 없는데 이만큼 연속으로 말을 걸었다면 물러남
 BACKOFF_THRESHOLD = 2
@@ -107,8 +111,10 @@ CHECKIN_SYSTEM = """당신은 "마늘"입니다. 지금은 사용자와 대화 �
 - "특정 요일(예: 화요일)마다 유독 조용함"
 
 패턴이 흐릿하거나 데이터 한두 개로 짜맞춘 느낌이면 쓰지 마세요. **근거가 얇으면
-성찰 질문 대신 침묵하거나, 그냥 짧은 관찰(판단)로 끝내세요.** 지어낸 패턴은
-마늘이 사용자를 안다고 착각하게 만들 뿐입니다.
+절대 하지 마세요.** 성찰 질문 대신 침묵하거나, 그냥 짧은 관찰(판단)로 끝내세요.
+**억지로 패턴을 지어내는 것이 가장 나쁩니다** — 마늘이 사용자를 안다고
+착각하게 만들 뿐이고, 신뢰를 깎습니다. **대부분의 체크인에는 성찰 질문이
+없는 게 정상입니다.**
 
 **형식은 반드시 이 순서**:
 (a) 관찰한 데이터를 구체적으로 먼저 제시하세요 (숫자, 날짜, 반복 횟수 등).
@@ -118,9 +124,10 @@ CHECKIN_SYSTEM = """당신은 "마늘"입니다. 지금은 사용자와 대화 �
 예시: "이번 달 버그 수정 커밋을 보니 평균 8번씩 걸렸어요. 처음 시도에서 뭔가
 자꾸 빗나가는 것 같은데, 혹시 짚이는 게 있어요?"
 
-**빈도**: 이건 아주 드물어야 합니다. 대부분의 체크인은 침묵이거나 짧은 판단이어야
-하고, 성찰 질문은 100일 동안 몇 번 정도만 나와야 합니다. 위 상황에 나오는
-"최근 성찰 질문" 횟수와 이력을 참고해서, 최근에 이미 했다면 다시 쓰지 마세요.
+**빈도**: 이건 아주 드물어야 합니다. 위 상황에 "성찰 질문 후보 자격"이 표시됩니다.
+**자격이 없다고 나와 있으면 이번엔 절대 시도하지 마세요** — 마지막 성찰 질문 이후
+아직 충분히 지나지 않았거나, 최근 데이터가 패턴을 말할 만큼 쌓이지 않은 겁니다.
+이건 프롬프트가 아니라 코드로도 강제되므로, 자격 없이 시도해도 침묵으로 대체됩니다.
 
 **성찰 질문에는 채점 버튼을 붙이지 않습니다.** 맞다/틀리다를 매길 판단이 아니라
 답해도 되고 안 해도 되는 질문이기 때문입니다.
@@ -140,6 +147,26 @@ CHECKIN_SYSTEM = """당신은 "마늘"입니다. 지금은 사용자와 대화 �
 
 **unspoken은 침묵할 때 반드시 채우세요.** 이건 보내지 않습니다.
 나중에 '그때 말했어야 했나'를 채점하기 위한 기록입니다. 삼킨 말을 그대로 적으세요."""
+
+
+def _reflection_eligibility() -> tuple[bool, int, int | None]:
+    """성찰 질문 후보가 될 자격이 있는가. 프롬프트가 아니라 코드로 강제합니다.
+
+    조건: (1) 마지막 성찰 질문 이후 REFLECTION_MIN_GAP_DAYS일 이상 지남
+          (2) 최근 REFLECTION_WINDOW_DAYS일간 성취+GitHub 활동일이
+              REFLECTION_MIN_DATA_POINTS건 이상 (데이터가 얇으면 패턴을 지어내게 됨)
+    반환: (자격 있음, 관찰 기간 동안의 데이터 포인트 수, 마지막 성찰 이후 지난 일수)
+    """
+    gap = db.days_since_last_reflection()
+    data_points = (
+        len(db.achievements_since(REFLECTION_WINDOW_DAYS))
+        + len({g["date"] for g in db.github_active_days(REFLECTION_WINDOW_DAYS)})
+    )
+    eligible = (
+        (gap is None or gap >= REFLECTION_MIN_GAP_DAYS)
+        and data_points >= REFLECTION_MIN_DATA_POINTS
+    )
+    return eligible, data_points, gap
 
 
 def _context_block() -> str:
@@ -204,7 +231,20 @@ def _context_block() -> str:
             lines.append(f"    · [{a['depth']}단] {a['text']} ({a['created_at'][:10]})")
 
     refl_count = db.reflection_count_since(TOTAL_DAYS)
-    lines.append(f"- 지금까지 성찰 질문 {refl_count}번 (100일에 몇 번이 적당 — 남발 금지)")
+    eligible, data_points, gap = _reflection_eligibility()
+    if eligible:
+        gap_str = f"{gap}일 전" if gap is not None else "이력 없음"
+        lines.append(
+            f"- 성찰 질문 후보 자격 있음 (최근 {REFLECTION_WINDOW_DAYS}일 데이터 {data_points}건, "
+            f"마지막 성찰 질문 {gap_str}). 지금까지 {refl_count}번 — 뚜렷한 패턴일 때만 쓰세요."
+        )
+    else:
+        why = []
+        if gap is not None and gap < REFLECTION_MIN_GAP_DAYS:
+            why.append(f"마지막 성찰 질문이 {gap}일 전이라 {REFLECTION_MIN_GAP_DAYS}일 간격을 못 채움")
+        if data_points < REFLECTION_MIN_DATA_POINTS:
+            why.append(f"최근 {REFLECTION_WINDOW_DAYS}일 데이터가 {data_points}건뿐이라 근거 부족")
+        lines.append(f"- 성찰 질문 후보 자격 없음 ({', '.join(why)}) — 이번엔 시도하지 마세요")
 
     if past:
         lines.append("- 최근 체크인 이력 (같은 얘기를 반복하지 않기 위한 참고):")
@@ -300,6 +340,26 @@ async def decide() -> dict:
     speak = bool(result.get("speak")) and bool(result.get("message"))
     trigger = result.get("trigger") if result.get("trigger") in TRIGGERS else "none"
     reflection = speak and bool(result.get("reflection"))
+    message = result.get("message") if speak else None
+    unspoken = None if speak else (result.get("unspoken") or None)
+    reason = result.get("reason") or ""
+
+    if reflection:
+        # 코드 차원의 안전장치: 프롬프트에 자격을 알려줬어도 모델이 어길 수 있음.
+        # 자격 없이 성찰 질문을 시도했으면 아예 침묵으로 대체합니다 — 절반쯤
+        # 지켜진 성찰 질문(예: 버튼만 없는 지적)을 내보내는 것보다 안전합니다.
+        eligible, data_points, gap = _reflection_eligibility()
+        if not eligible:
+            log.warning(
+                "성찰 질문 자격 미달인데 시도함 (data_points=%s, gap=%s) — 침묵으로 강제",
+                data_points, gap,
+            )
+            unspoken = message
+            message = None
+            speak = False
+            reflection = False
+            reason = f"성찰 질문 자격 미달로 침묵 강제 (원래 근거: {reason})"
+
     # 안부/공감은 판단이 아니므로 채점 버튼이 필요 없음. speak가 false면 애초에 안 붙음.
     # 모델이 필드를 빠뜨리면(None) 기존 동작대로 판단으로 취급 — 명시적으로 false일 때만 안부.
     # 성찰 질문은 형식상 판단이 아니므로, 모델이 뭐라 답했든 채점 버튼을 강제로 뗌.
@@ -311,9 +371,9 @@ async def decide() -> dict:
         "trigger": trigger if speak else "none",
         "needs_feedback": needs_feedback,
         "reflection": reflection,
-        "reason": result.get("reason") or "",
-        "message": result.get("message") if speak else None,
-        "unspoken": None if speak else (result.get("unspoken") or None),
+        "reason": reason,
+        "message": message,
+        "unspoken": unspoken,
         "prompt_version": version,
         "raw_input": _make_raw(context, history),
     }
