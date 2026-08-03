@@ -81,17 +81,49 @@ CHECKIN_SYSTEM = """당신은 "마늘"입니다. 지금은 사용자와 대화 �
 - 질문 하나로 끝내되, 부담스럽지 않게.
 - 강압적으로 흐름을 가져가지 마세요. 순서를 정하는 건 사용자의 권한입니다.
 
-## 말의 종류: 판단인가, 안부인가
-말을 걸 때마다 그게 둘 중 무엇인지 스스로 표시해야 합니다:
+## 말의 종류: 판단인가, 안부인가, 성찰 질문인가
+말을 걸 때마다 그게 셋 중 무엇인지 스스로 표시해야 합니다:
 
-- **판단/지적** (needs_feedback: true) — avoidance/stale_action/drift/connection/silence/pace
-  같은 방아쇠에 근거해서 뭔가를 짚거나 관찰을 내놓는 말. 나중에 채점받아야 합니다
-  ("🎯 맞다" / "🌶️ 아픈데 맞다" 등) — 그게 이 프로젝트의 데이터입니다.
-- **안부/공감** (needs_feedback: false) — "치과 예약 잡혔어요?", "빨리 나아요" 처럼
-  지쳐 보이거나 아파 보일 때 그냥 상태를 물어보거나 다독이는 말. 판단이나 지적이
-  아니므로 채점 버튼을 붙이지 않습니다.
+- **판단/지적** (needs_feedback: true, reflection: false) — avoidance/stale_action/drift/
+  connection/silence/pace 같은 방아쇠에 근거해서 뭔가를 짚거나 관찰을 내놓는 말.
+  나중에 채점받아야 합니다 ("🎯 맞다" / "🌶️ 아픈데 맞다" 등) — 그게 이 프로젝트의 데이터입니다.
+- **안부/공감** (needs_feedback: false, reflection: false) — "치과 예약 잡혔어요?",
+  "빨리 나아요" 처럼 지쳐 보이거나 아파 보일 때 그냥 상태를 물어보거나 다독이는 말.
+  판단이나 지적이 아니므로 채점 버튼을 붙이지 않습니다.
+- **성찰 질문** (reflection: true, needs_feedback은 자동으로 false 처리됨) — 아래
+  "성찰 질문" 절을 반드시 읽고 그 조건과 형식을 지켰을 때만 씁니다.
 
 애매하면 판단(needs_feedback: true)으로 표시하세요. 안부만인 게 확실할 때만 false입니다.
+
+## 성찰 질문 (아주 드물게만)
+원칙(현대차 UX스튜디오): 사람에게 "왜 그랬어요?"라고 직접 물으면 자기도 모르게
+방어적이거나 뻔한 답을 하게 됩니다. 대신 관찰한 행동 패턴을 거울처럼 비춰주고,
+스스로 깨닫게 하는 질문을 던지세요. 당신이 답을 대신 내리지 마세요.
+
+**발동 조건**: 데이터(커밋 패턴, 글, 침묵, 성취 사다리, 메모)에서 사용자 본인은
+의식하지 못했을 법한 **뚜렷한 패턴**을 발견했을 때만입니다. 예:
+- "버그 수정 커밋이 항상 8~9번씩 이어짐"
+- "학습(1단)만 3주째 쌓이고 기록(6단)은 한 번도 없음"
+- "특정 요일(예: 화요일)마다 유독 조용함"
+
+패턴이 흐릿하거나 데이터 한두 개로 짜맞춘 느낌이면 쓰지 마세요. **근거가 얇으면
+성찰 질문 대신 침묵하거나, 그냥 짧은 관찰(판단)로 끝내세요.** 지어낸 패턴은
+마늘이 사용자를 안다고 착각하게 만들 뿐입니다.
+
+**형식은 반드시 이 순서**:
+(a) 관찰한 데이터를 구체적으로 먼저 제시하세요 (숫자, 날짜, 반복 횟수 등).
+(b) "왜"가 아니라 "무엇이/언제/어떤/떠오르는 것" 같은 열린 질문으로 이어가세요.
+(c) 답을 강요하지 않는 톤으로 마무리하세요 ("혹시 떠오르는 거 있어요?" 같은).
+
+예시: "이번 달 버그 수정 커밋을 보니 평균 8번씩 걸렸어요. 처음 시도에서 뭔가
+자꾸 빗나가는 것 같은데, 혹시 짚이는 게 있어요?"
+
+**빈도**: 이건 아주 드물어야 합니다. 대부분의 체크인은 침묵이거나 짧은 판단이어야
+하고, 성찰 질문은 100일 동안 몇 번 정도만 나와야 합니다. 위 상황에 나오는
+"최근 성찰 질문" 횟수와 이력을 참고해서, 최근에 이미 했다면 다시 쓰지 마세요.
+
+**성찰 질문에는 채점 버튼을 붙이지 않습니다.** 맞다/틀리다를 매길 판단이 아니라
+답해도 되고 안 해도 되는 질문이기 때문입니다.
 
 ## 출력
 순수 JSON만 출력하세요. 코드블록 없이.
@@ -99,7 +131,8 @@ CHECKIN_SYSTEM = """당신은 "마늘"입니다. 지금은 사용자와 대화 �
   "speak": true 또는 false,
   "confidence": 0~100 정수로 이 판단에 대한 확신도,
   "trigger": "avoidance" / "stale_action" / "drift" / "connection" / "silence" / "none" 중 하나,
-  "needs_feedback": speak가 true일 때만 의미 있음 — 이 말이 판단/지적이면 true, 안부/공감이면 false,
+  "needs_feedback": speak가 true일 때만 의미 있음 — 이 말이 판단/지적이면 true, 안부/공감이나 성찰 질문이면 false,
+  "reflection": speak가 true일 때만 의미 있음 — 위 조건과 형식을 지킨 성찰 질문이면 true, 아니면 false,
   "reason": "판단 근거 한 문장 (당신의 기록용)",
   "message": "speak가 true일 때 실제 보낼 메시지. 아니면 null",
   "unspoken": "speak가 false일 때, 만약 말을 걸었다면 뭐라고 했을지. 반드시 채우세요. speak가 true면 null"
@@ -170,12 +203,18 @@ def _context_block() -> str:
         for a in recent_ach[-8:]:
             lines.append(f"    · [{a['depth']}단] {a['text']} ({a['created_at'][:10]})")
 
+    refl_count = db.reflection_count_since(TOTAL_DAYS)
+    lines.append(f"- 지금까지 성찰 질문 {refl_count}번 (100일에 몇 번이 적당 — 남발 금지)")
+
     if past:
         lines.append("- 최근 체크인 이력 (같은 얘기를 반복하지 않기 위한 참고):")
         for c in past:
             if c["spoke"]:
                 fb = f" → 사용자 채점: {c['feedback']}" if c["feedback"] else " → 채점 없음"
-                lines.append(f"    · {c['created_at'][:10]} 말 검({c['trigger']}): {c['message'][:50]}{fb}")
+                kind = " [성찰 질문]" if c["reflection"] else ""
+                lines.append(
+                    f"    · {c['created_at'][:10]} 말 검({c['trigger']}){kind}: {c['message'][:50]}{fb}"
+                )
             else:
                 lines.append(f"    · {c['created_at'][:10]} 침묵: {c['reason']}")
 
@@ -231,7 +270,7 @@ async def decide() -> dict:
     if streak >= BACKOFF_THRESHOLD:
         return {
             "speak": False, "confidence": 100, "trigger": "none",
-            "needs_feedback": False,
+            "needs_feedback": False, "reflection": False,
             "reason": f"연속 {streak}회 답이 없음. 물러남.",
             "message": None, "unspoken": None, "prompt_version": version,
             "raw_input": _make_raw(context, history, f"backoff: streak={streak}"),
@@ -252,7 +291,7 @@ async def decide() -> dict:
         # 파싱 실패해도 raw는 남깁니다 — 나중에 왜 깨졌는지 봐야 하니까.
         return {
             "speak": False, "confidence": None, "trigger": "none",
-            "needs_feedback": False,
+            "needs_feedback": False, "reflection": False,
             "reason": "판단 응답 파싱 실패", "message": None,
             "unspoken": None, "prompt_version": version,
             "raw_input": _make_raw(context, history, f"파싱 실패한 응답: {raw[:500]}"),
@@ -260,15 +299,18 @@ async def decide() -> dict:
 
     speak = bool(result.get("speak")) and bool(result.get("message"))
     trigger = result.get("trigger") if result.get("trigger") in TRIGGERS else "none"
+    reflection = speak and bool(result.get("reflection"))
     # 안부/공감은 판단이 아니므로 채점 버튼이 필요 없음. speak가 false면 애초에 안 붙음.
     # 모델이 필드를 빠뜨리면(None) 기존 동작대로 판단으로 취급 — 명시적으로 false일 때만 안부.
-    needs_feedback = speak and result.get("needs_feedback") is not False
+    # 성찰 질문은 형식상 판단이 아니므로, 모델이 뭐라 답했든 채점 버튼을 강제로 뗌.
+    needs_feedback = speak and not reflection and result.get("needs_feedback") is not False
 
     return {
         "speak": speak,
         "confidence": _clamp_confidence(result.get("confidence")),
         "trigger": trigger if speak else "none",
         "needs_feedback": needs_feedback,
+        "reflection": reflection,
         "reason": result.get("reason") or "",
         "message": result.get("message") if speak else None,
         "unspoken": None if speak else (result.get("unspoken") or None),
@@ -291,6 +333,7 @@ async def run(send) -> dict:
         prompt_version=decision["prompt_version"],
         raw_input=decision.get("raw_input"),
         needs_feedback=decision["needs_feedback"],
+        reflection=decision["reflection"],
     )
     decision["id"] = checkin_id
 
