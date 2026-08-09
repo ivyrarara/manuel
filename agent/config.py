@@ -27,11 +27,17 @@ BLOG_MAGAZINE_SLUG = os.getenv("BLOG_MAGAZINE_SLUG", "designer-renew").strip()
 GITHUB_USER = os.getenv("GITHUB_USER", "").strip()
 GITHUB_CHECK_HOUR, GITHUB_CHECK_MINUTE = 18, 40  # 체크인 20분 전에 오늘 커밋을 반영
 
-# 성취 집계에서 뺄 저장소들 (쉼표 구분, owner 없이 저장소 이름만). 기본값은 마늘
-# 자기 자신의 소스코드 저장소입니다 — 마늘을 고치는 건 사용자의 성장이 아니라
-# 봇 정비라서, 100일 페이스 기록에 섞이면 안 됩니다.
+# 성취 집계에서 뺄 저장소들 (쉼표 구분, owner 없이 저장소 이름만).
+# manuel: 마늘 자기 자신의 소스코드 저장소입니다 — 마늘을 고치는 건 사용자의
+#   성장이 아니라 봇 정비라서, 100일 페이스 기록에 섞이면 안 됩니다.
+# opportunity: 성취 집계 대상이 아닌 별도 용도의 저장소라 마늘이 커밋 메시지나
+#   PR 제목을 읽지 않도록 뺍니다. github.py의 _group_events()가 이 목록에 있는
+#   저장소를 가장 먼저 걸러내므로, 제외된 저장소는 Compare API/PR 상세 조회
+#   자체가 일어나지 않습니다 — 내용을 아예 읽지 않는다는 뜻입니다.
 GITHUB_EXCLUDE_REPOS = {
-    r.strip() for r in os.getenv("GITHUB_EXCLUDE_REPOS", "manuel").split(",") if r.strip()
+    r.strip()
+    for r in os.getenv("GITHUB_EXCLUDE_REPOS", "manuel,opportunity").split(",")
+    if r.strip()
 }
 
 MODEL = "claude-sonnet-4-6"
