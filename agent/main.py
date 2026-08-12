@@ -136,6 +136,24 @@ async def _with_link_content(text: str) -> str:
     return f"{text}\n\n[아래는 사용자가 보낸 링크의 내용입니다]\n{article[:10000]}"
 
 
+async def _try_infer_feedback(pending, user_reply: str) -> str:
+    """버튼 대신 텍스트로 답장했을 때, 그 답장에서 채점을 추론해 기록합니다.
+
+    애매하면(모델이 null을 반환하면) 아무것도 안 합니다 — 잘못 채점하는 것보다
+    안 채점하는 게 낫습니다. 성공하면 채팅 답장 끝에 붙일 짧은 확인 문구를 반환합니다.
+    """
+    try:
+        code = await checkin.infer_feedback(pending["message"], user_reply)
+    except Exception:
+        log.exception("채점 자동 추론 실패")
+        return ""
+    if not code:
+        return ""
+    db.set_feedback(pending["id"], code, source="text")
+    label = FEEDBACK_LABELS.get(code, code)
+    return f"\n\n(판단 채점: {label}로 기록했어요 — 다르면 위 버튼을 눌러 고쳐도 돼요)"
+
+
 @owner_only
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -143,6 +161,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=OWNER_CHAT_ID, action=ChatAction.TYPING)
+
+    # respond_to()가 이 메시지를 대화 기록에 남기기 전에 먼저 확인해야 합니다.
+    # 남고 나면 "이게 그 판단에 대한 첫 답장"이라는 조건이 깨집니다.
+    pending_feedback = db.pending_feedback_checkin()
+    original_text = text
 
     try:
         text = await _with_link_content(text)
@@ -152,7 +175,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("마늘이 응답하지 못했어요. 잠시 후 다시 시도해주세요.")
         return
 
-    await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
+    feedback_note = await _try_infer_feedback(pending_feedback, original_text) if pending_feedback else ""
+
+    await update.message.reply_text(result["reply"] + feedback_note + format_insights(result["insights"]))
 
     # 지나가는 말이 영구 규칙이 되지 않도록, 승인을 받고 나서 적용합니다.
     for pref in result["proposed"]:

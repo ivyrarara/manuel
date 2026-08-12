@@ -83,8 +83,9 @@ create table if not exists checkins (
     unspoken       text,          -- 침묵했을 때, 말했다면 했을 말
     prompt_version text,          -- 어떤 버전의 마늘이 내린 판단인가
     raw_input      text,          -- 판단의 입력 원문 (그때 마늘이 본 것 전부)
-    feedback       text,          -- 탭으로 받은 채점 결과
+    feedback       text,          -- 채점 결과 (버튼 탭 또는 텍스트 답장에서 추론)
     feedback_at    text,
+    feedback_source text,         -- 채점이 어디서 왔나: 'button' 또는 'text'
     needs_feedback integer not null default 1,  -- 판단/지적이라 채점 버튼이 필요한가 (안부·공감이면 0)
     reflection     integer not null default 0,  -- 관찰-거울-열린질문 형식의 성찰 질문인가 (드물어야 함)
     created_at     text not null
@@ -172,6 +173,7 @@ def _ensure_columns(conn):
             ("raw_input", "text"),
             ("feedback", "text"),
             ("feedback_at", "text"),
+            ("feedback_source", "text"),
             ("needs_feedback", "integer not null default 1"),
             ("reflection", "integer not null default 0"),
         ],
@@ -590,13 +592,42 @@ def days_since_last_reflection() -> int | None:
     return days_since(row["created_at"])
 
 
-def set_feedback(checkin_id: int, feedback: str) -> bool:
+def set_feedback(checkin_id: int, feedback: str, source: str = "button") -> bool:
+    """채점을 기록합니다. source는 'button'(탭) 또는 'text'(답장에서 추론).
+
+    버튼 탭이 나중에 와도 그대로 덮어씁니다 — 명시적으로 누른 게 추론보다 우선입니다.
+    """
     with connect() as conn:
         cur = conn.execute(
-            "update checkins set feedback = ?, feedback_at = ? where id = ?",
-            (feedback, _now(), checkin_id),
+            "update checkins set feedback = ?, feedback_at = ?, feedback_source = ? where id = ?",
+            (feedback, _now(), source, checkin_id),
         )
         return cur.rowcount > 0
+
+
+def pending_feedback_checkin() -> sqlite3.Row | None:
+    """채점 대기 중인 가장 최근 판단성 발화 — 있다면, 텍스트 답장에서 채점을 추론할 후보.
+
+    조건: 버튼이 붙었던(needs_feedback) 발화인데 아직 채점이 안 됐고, 그 이후로
+    사용자 메시지가 아직 한 번도 없었던 경우만입니다. 즉 지금 오는 텍스트가
+    그 발화에 대한 **첫 답장**일 때만 채점 추론 대상이 됩니다 — 그래야 나중에
+    완전히 다른 화제로 보낸 메시지를 엉뚱하게 채점하는 일이 없습니다.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "select id, message, trigger, reason, created_at from checkins "
+            "where spoke = 1 and needs_feedback = 1 and feedback is null "
+            "order by id desc limit 1"
+        ).fetchone()
+        if not row:
+            return None
+        after = conn.execute(
+            "select count(*) as n from messages where role = 'user' and created_at > ?",
+            (row["created_at"],),
+        ).fetchone()["n"]
+        if after > 0:
+            return None
+        return row
 
 
 def unreviewed_silences(days: int = 7, limit: int = 3) -> list[sqlite3.Row]:
