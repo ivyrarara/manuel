@@ -14,9 +14,9 @@ import logging
 
 from . import brain, db
 from .config import (
-    BACKGROUND, HISTORY_LIMIT, LADDER, PACE_SHALLOW_DEPTH,
-    PACE_WINDOW_WEEKS, REFLECTION_MIN_DATA_POINTS, REFLECTION_MIN_GAP_DAYS,
-    REFLECTION_WINDOW_DAYS, TOTAL_DAYS, TRIGGERS,
+    BACKGROUND, FEEDBACK_LABELS, FEEDBACK_OPTIONS, HISTORY_LIMIT, LADDER,
+    PACE_SHALLOW_DEPTH, PACE_WINDOW_WEEKS, REFLECTION_MIN_DATA_POINTS,
+    REFLECTION_MIN_GAP_DAYS, REFLECTION_WINDOW_DAYS, TOTAL_DAYS, TRIGGERS,
 )
 
 log = logging.getLogger(__name__)
@@ -401,5 +401,56 @@ async def run(send) -> dict:
         await send(decision["message"], checkin_id, decision["needs_feedback"])
         # 마늘이 먼저 건 말도 대화 기록에 남아야 다음 판단에 반영됨
         db.add_message("assistant", decision["message"])
+
+    return decision
+
+
+FEEDBACK_INFER_SYSTEM = """마늘이 먼저 건 판단/지적에 사용자가 버튼 대신 텍스트로
+답장했습니다. 그 답장이 아래 6가지 채점 중 어디에 해당하는지 추론하세요.
+
+마늘이 한 말:
+"{checkin_message}"
+
+사용자의 답장:
+"{user_reply}"
+
+## 채점 옵션
+{options}
+
+## 판단 기준
+- "맞아", "그러네", "인정" 처럼 담담하게 인정하면 on_target.
+  같은 인정이라도 놀라거나 뜨끔해하는 반응이 함께 있으면 painful_true.
+- "그건 이미 알고 있었어", "당연한 거 아냐" 처럼 새로울 게 없다는 반응이면 obvious.
+- "맞는데 지금은 아니야", "그거 할 때가 아니야" 처럼 타이밍을 지적하면 bad_timing.
+- "왜 그렇게 말해", "부담스럽다", "꼭 그렇게까지" 처럼 방식 자체에 불편함을
+  드러내면 pushy.
+- "그건 사실이 아니야", "그렇게 안 했는데" 처럼 근거를 정정하면 wrong_fact.
+- 답장이 그냥 다른 화제거나, 질문에 실제 내용으로만 답하고 이 판단이 맞았는지에
+  대한 반응이 전혀 없으면 **반드시 null**입니다.
+
+**애매하면 반드시 null입니다.** 확신 없이 추측해서 채점하면 이 프로젝트의
+핵심 데이터가 오염됩니다. 틀리게 채점하는 것이 안 채점하는 것보다 나쁩니다.
+
+## 출력
+순수 JSON만 출력하세요. 코드블록 없이.
+{{"feedback": 위 6개 코드 중 하나 또는 null, "reason": "왜 그렇게 판단했는지 한 문장"}}"""
+
+
+async def infer_feedback(checkin_message: str, user_reply: str) -> str | None:
+    """텍스트 답장에서 채점을 추론합니다. 애매하면 None — 잘못 채점하는 것보다
+    안 채점하는 게 낫습니다 (체크인 판단 자체의 '근거 얇으면 침묵' 원칙과 같습니다).
+    """
+    options = "\n".join(f"- {code}: {label}" for code, label in FEEDBACK_OPTIONS)
+    system = FEEDBACK_INFER_SYSTEM.format(
+        checkin_message=checkin_message, user_reply=user_reply, options=options,
+    )
+    raw = await brain.call(
+        [{"role": "user", "content": "위 기준으로 판단하세요."}], system=system, max_tokens=200,
+    )
+    result = brain.extract_json(raw)
+    if not result:
+        return None
+    code = result.get("feedback")
+    return code if code in FEEDBACK_LABELS else None
 
     return decision
