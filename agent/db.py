@@ -9,6 +9,7 @@ checkins 테이블이 이 프로젝트의 자산입니다. 코드가 아니라 �
 import collections
 import contextlib
 import hashlib
+import logging
 import os
 import re
 import sqlite3
@@ -16,6 +17,8 @@ import tempfile
 from datetime import date, datetime, timedelta
 
 from .config import DB_PATH, SEED_PREFERENCES, START_DATE, TOTAL_DAYS, TZ
+
+log = logging.getLogger("maneul.db")
 
 SCHEMA = """
 create table if not exists messages (
@@ -198,7 +201,7 @@ def _ensure_columns(conn):
         for name, decl in columns:
             if name not in have:
                 conn.execute(f"alter table {table} add column {name} {decl}")
-                print(f"[migration] {table}.{name} 추가됨")
+                log.info("[migration] %s.%s 추가됨", table, name)
 
 
 def init():
@@ -767,12 +770,12 @@ def github_activity_exists(key: str) -> bool:
         ).fetchone() is not None
 
 
-def add_github_activity(key: str, repo: str, date: str, commits: int) -> bool:
+def add_github_activity(key: str, repo: str, date_str: str, commits: int) -> bool:
     with connect() as conn:
         cur = conn.execute(
             "insert or ignore into github_activity (key, repo, date, commits, created_at) "
             "values (?, ?, ?, ?, ?)",
-            (key, repo, date, commits, _now()),
+            (key, repo, date_str, commits, _now()),
         )
         return cur.rowcount > 0
 

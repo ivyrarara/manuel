@@ -177,7 +177,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     feedback_note = await _try_infer_feedback(pending_feedback, original_text) if pending_feedback else ""
 
-    await update.message.reply_text(result["reply"] + feedback_note + format_insights(result["insights"]))
+    try:
+        await update.message.reply_text(result["reply"] + feedback_note + format_insights(result["insights"]))
+    except Exception:
+        # brain.respond_to()가 이 응답을 이미 DB에 "말한 것"으로 기록한 뒤입니다.
+        # 여기서 전송이 실패하면 DB와 실제로 사용자가 받은 것이 어긋나므로, 최소한 로그는 남깁니다.
+        log.exception("답장 전송 실패 (DB에는 이미 기록됨)")
+        return
 
     # 지나가는 말이 영구 규칙이 되지 않도록, 승인을 받고 나서 적용합니다.
     for pref in result["proposed"]:
@@ -212,6 +218,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=OWNER_CHAT_ID, action=ChatAction.TYPING)
 
+    # respond_to_photo()가 이 사진을 대화 기록에 "user" 메시지로 남기기 전에 먼저 확인해야
+    # 합니다 — on_message()와 같은 이유입니다. 이걸 안 하면 판단/지적에 대한 첫 답장이
+    # 사진이었을 때 채점 추론을 아예 시도하지도 못한 채로 창이 영영 닫혀버립니다.
+    pending_feedback = db.pending_feedback_checkin()
+
     try:
         tg_file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await tg_file.download_as_bytearray())
@@ -222,7 +233,14 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("사진을 보는 데 실패했어요. 잠시 후 다시 시도해주세요.")
         return
 
-    await update.message.reply_text(result["reply"] + format_insights(result["insights"]))
+    # 캡션을 답장 텍스트 삼아 채점을 추론합니다. 캡션이 없거나 애매하면 null로 남습니다.
+    feedback_note = await _try_infer_feedback(pending_feedback, caption) if pending_feedback else ""
+
+    try:
+        await update.message.reply_text(result["reply"] + feedback_note + format_insights(result["insights"]))
+    except Exception:
+        log.exception("사진 답장 전송 실패 (DB에는 이미 기록됨)")
+        return
 
     for pref in result["proposed"]:
         await update.message.reply_text(
@@ -273,6 +291,15 @@ async def on_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """핸들러 안에서 못 잡은 예외의 최후 안전망.
+
+    등록 안 해두면 python-telegram-bot이 자기 내부 로거로만 남기고 넘어가서,
+    이 프로젝트가 실패 경로마다 지키는 log.exception() 패턴 밖으로 새 나갑니다.
+    """
+    log.error("처리되지 않은 예외", exc_info=context.error)
 
 
 @owner_only
@@ -450,7 +477,7 @@ async def _send_backup(bot, caption: str):
             try:
                 os.remove(path)
             except OSError:
-                pass
+                log.warning("백업 임시파일 삭제 실패: %s", path)
 
 
 @owner_only
@@ -474,7 +501,17 @@ async def checkin_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=feedback_keyboard(checkin_id) if needs_feedback else None,
         )
 
-    decision = await checkin.run(send)
+    # job_checkin과 동일한 안전장치. 여기서 실패를 삼키면 "오늘도 침묵했나 보다"와
+    # "고장났다"를 사용자가 구분할 방법이 없어집니다.
+    try:
+        decision = await checkin.run(send)
+    except Exception as e:
+        log.exception("수동 체크인 실패")
+        await update.message.reply_text(
+            f"⚠️ 체크인이 실패했어요. 침묵이 아니라 고장이에요.\n\n{type(e).__name__}: {str(e)[:200]}"
+        )
+        return
+
     if not decision["speak"]:
         conf = f" (확신도 {decision['confidence']}%)" if decision["confidence"] is not None else ""
         text = f"(침묵을 선택했어요{conf} — {decision['reason']})"
@@ -627,8 +664,10 @@ async def job_blog(context: ContextTypes.DEFAULT_TYPE):
             chat_id=OWNER_CHAT_ID,
             text=f"블로그에 새 글이 올라왔네요. 6단 성취로 기록했어요.\n\n{titles}",
         )
-        # 가장 최근 글 하나만 분석 — 여러 개면 알림이 시끄러워집니다
-        await send_post_insights(context, result["recorded"][-1])
+        # 가장 최근 글 하나만 분석 — 여러 개면 알림이 시끄러워집니다.
+        # RSS는 관례상 최신 글이 먼저 오고, blog.sync()는 그 순서를 그대로 보존하므로
+        # recorded[0]이 가장 최근 글입니다 (/blog 핸들러의 recorded[:1]과 동일한 기준).
+        await send_post_insights(context, result["recorded"][0])
     except Exception:
         log.exception("블로그 잡 실패")
 
@@ -800,6 +839,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_feedback, pattern=r"^(fb|sr):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_error_handler(on_error)
 
     jq = app.job_queue
     jq.run_daily(job_blog, time=dtime(BLOG_CHECK_HOUR, BLOG_CHECK_MINUTE, tzinfo=TZ))
