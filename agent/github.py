@@ -24,11 +24,12 @@ PullRequestEvent.payload.pull_request도 축약판이라 title이 없어서, PR 
 """
 import collections
 import logging
+from datetime import datetime
 
 import httpx
 
 from . import db
-from .config import GITHUB_EXCLUDE_REPOS, GITHUB_USER
+from .config import GITHUB_EXCLUDE_REPOS, GITHUB_USER, TZ
 
 log = logging.getLogger("maneul.github")
 
@@ -85,9 +86,11 @@ async def _fetch_compare_commits(
     try:
         r = await client.get(url, headers=HEADERS)
         if r.status_code != 200:
+            log.warning("커밋 비교 조회 실패 (%s): status=%s", repo, r.status_code)
             return None
         data = r.json()
     except Exception:
+        log.exception("커밋 비교 조회 실패 (%s, %s...%s)", repo, before, head)
         return None
     commits = data.get("commits") or []
     return [c.get("commit", {}).get("message", "") for c in commits if c.get("commit")]
@@ -99,9 +102,11 @@ async def _fetch_pr_title(client: httpx.AsyncClient, repo: str, number: int) -> 
     try:
         r = await client.get(url, headers=HEADERS)
         if r.status_code != 200:
+            log.warning("PR 제목 조회 실패 (%s #%s): status=%s", repo, number, r.status_code)
             return None
         return (r.json().get("title") or "").strip() or None
     except Exception:
+        log.exception("PR 제목 조회 실패 (%s #%s)", repo, number)
         return None
 
 
@@ -172,7 +177,12 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
             continue
         if repo.split("/")[-1] in GITHUB_EXCLUDE_REPOS:
             continue
-        date = created[:10]
+        # created_at은 GitHub API가 주는 UTC 시각("...Z")입니다. 그대로 앞 10자를 자르면
+        # 저녁(대략 7~8시 이후, TZ 기준) 활동이 다음 날짜로 새어버립니다 — db.py가 조심하는
+        # 바로 그 클래스의 버그입니다. TZ로 변환한 뒤에 날짜를 뽑습니다.
+        date = (
+            datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(TZ).date().isoformat()
+        )
         etype = e.get("type")
         payload = e.get("payload") or {}
 
@@ -228,7 +238,12 @@ async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
                 commit_count += 1
             else:
                 commit_count += len(result)
-                messages += result
+                # Compare API는 커밋을 오래된 것→최신 순으로 줍니다(문서화된 동작).
+                # 이 푸시 안에서는 최신순으로 뒤집어 붙여야, 바깥 루프가 이미 보장하는
+                # "최신 푸시가 먼저"와 합쳐졌을 때 messages 전체가 최신순이 됩니다.
+                # 안 뒤집으면 _pick_message()가 그날 가장 오래된(=이미 지나간) 시도의
+                # 커밋 메시지를 "최근 것"으로 착각해서 고릅니다.
+                messages += reversed(result)
 
         pr_titles = []
         for number in merge_prs.get((repo, date), []):

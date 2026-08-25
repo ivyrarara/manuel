@@ -452,5 +452,3 @@ async def infer_feedback(checkin_message: str, user_reply: str) -> str | None:
         return None
     code = result.get("feedback")
     return code if code in FEEDBACK_LABELS else None
-
-    return decision
