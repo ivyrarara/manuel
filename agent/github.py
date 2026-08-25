@@ -156,7 +156,7 @@ def _pick_message(messages: list[str]) -> str:
     return ""
 
 
-def _group_events(events: list) -> tuple[dict, dict, dict]:
+def _group_events(events: list) -> tuple[dict, dict, dict, dict]:
     """이벤트를 종류별로 묶습니다 (API 호출 없이, 순수 분류만).
 
     push/merge 전부 (저장소, 날짜) 단위로 묶습니다 — 그날 커밋을 몇 번 하고
@@ -165,10 +165,15 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
 
     GITHUB_EXCLUDE_REPOS에 있는 저장소는 아예 걸러냅니다 — 마늘 자기 자신을
     고치는 건 사용자의 성장이 아니라 봇 정비이므로, 성취로 셀 대상이 아닙니다.
+
+    latest_at은 (저장소, 날짜) -> 그 그룹에 속한 이벤트 중 가장 나중(로컬 TZ 기준)
+    시각입니다. 성취를 기록할 때 "동기화 잡이 도는 시각"이 아니라 "실제로 그 활동이
+    있었던 시각"을 쓰기 위해 필요합니다.
     """
     push_refs = collections.defaultdict(list)
     creates = {}
     merge_prs = collections.defaultdict(list)
+    latest_at: dict[tuple[str, str], datetime] = {}
 
     for e in events:
         repo = (e.get("repo") or {}).get("name")
@@ -180,9 +185,11 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
         # created_at은 GitHub API가 주는 UTC 시각("...Z")입니다. 그대로 앞 10자를 자르면
         # 저녁(대략 7~8시 이후, TZ 기준) 활동이 다음 날짜로 새어버립니다 — db.py가 조심하는
         # 바로 그 클래스의 버그입니다. TZ로 변환한 뒤에 날짜를 뽑습니다.
-        date = (
-            datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(TZ).date().isoformat()
-        )
+        local_dt = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone(TZ)
+        date = local_dt.date().isoformat()
+        key = (repo, date)
+        if key not in latest_at or local_dt > latest_at[key]:
+            latest_at[key] = local_dt
         etype = e.get("type")
         payload = e.get("payload") or {}
 
@@ -204,25 +211,28 @@ def _group_events(events: list) -> tuple[dict, dict, dict]:
                 if number is not None:
                     merge_prs[(repo, date)].append(number)
 
-    return push_refs, creates, merge_prs
+    return push_refs, creates, merge_prs, latest_at
 
 
 async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
     """이벤트를 묶고, 부족한 정보(커밋 메시지·PR 제목)를 추가로 가져와 완성합니다.
 
-    반환: [{"key","repo","date","kind","commits","message","merged_count"}...]
+    반환: [{"key","repo","date","kind","commits","message","merged_count","created_at"}...]
+    created_at은 실제 활동이 있었던 로컬 시각(포맷: db.format_ts) — add_achievement()에
+    "동기화 잡이 도는 시각" 대신 넘기기 위한 것입니다.
 
     (저장소, 날짜) 단위로 최대 1건만 만듭니다 — 커밋을 몇 번 하고 PR을 몇 개
     merge했든 그날의 성취는 1건입니다. 그날 merge된 PR이 있으면 제목을
     최우선으로 씁니다(가장 설명적이니까). 없으면 커밋 메시지 중에서 고릅니다.
     """
-    push_refs, creates, merge_prs = _group_events(events)
+    push_refs, creates, merge_prs, latest_at = _group_events(events)
 
     items = []
     for (repo, date) in creates:
         items.append({
             "key": f"create:{repo}:{date}", "repo": repo, "date": date,
             "kind": "create", "commits": 0, "message": "", "merged_count": 0,
+            "created_at": db.format_ts(latest_at[(repo, date)]),
         })
 
     for (repo, date) in set(push_refs) | set(merge_prs):
@@ -258,6 +268,7 @@ async def _digest(client: httpx.AsyncClient, events: list) -> list[dict]:
             "key": f"push:{repo}:{date}", "repo": repo, "date": date,
             "kind": "push", "commits": commit_count, "message": message,
             "merged_count": len(pr_titles),
+            "created_at": db.format_ts(latest_at[(repo, date)]),
         })
 
     return sorted(items, key=lambda i: i["date"])
@@ -314,7 +325,7 @@ async def sync() -> dict:
     recorded = []
     for i in countable:
         text, depth = _describe(i)
-        db.add_achievement(text, depth=depth)
+        db.add_achievement(text, depth=depth, created_at=i.get("created_at"))
         recorded.append(text)
 
     if backlog:
