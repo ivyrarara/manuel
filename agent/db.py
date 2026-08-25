@@ -116,6 +116,14 @@ def _now() -> str:
     return datetime.now(TZ).strftime(TS_FORMAT)
 
 
+def format_ts(dt: datetime) -> str:
+    """저장용 형식으로 시각을 찍습니다. GitHub 커밋·블로그 발행처럼 "지금"이 아니라
+    실제 사건이 일어난 시각을 이미 알고 있을 때, _now() 대신 이걸로 그 시각을 그대로 씁니다.
+    dt는 미리 TZ로 변환되어 있어야 합니다 — 이 함수는 포맷만 맞출 뿐 타임존 변환은 안 합니다.
+    """
+    return dt.strftime(TS_FORMAT)
+
+
 def _cutoff(days: int) -> str:
     return (datetime.now(TZ) - timedelta(days=days)).strftime(TS_FORMAT)
 
@@ -667,12 +675,21 @@ def unanswered_checkin_streak() -> int:
 
 # ---------- 성취 ----------
 
-def add_achievement(text: str, depth: int, message_id: int | None = None) -> int:
+def add_achievement(
+    text: str, depth: int, message_id: int | None = None, created_at: str | None = None
+) -> int:
+    """성취를 기록합니다. created_at을 넘기면 그 시각으로, 안 넘기면 지금(_now())으로 찍힙니다.
+
+    GitHub 커밋·블로그 발행처럼 실제 사건이 언제 일어났는지 아는 경우엔 반드시 넘기세요.
+    안 넘기면(동기화 잡이 도는 시각으로 찍히면) weekly_depth()의 주차 버킷팅이 실제
+    활동 주와 어긋날 수 있습니다 — 특히 주 경계 근처의 활동이 동기화가 늦어지는 바람에
+    다음 주로 새는 식으로요.
+    """
     with connect() as conn:
         cur = conn.execute(
             "insert into insights (message_id, text, type, depth, created_at) "
             "values (?, ?, 'achievement', ?, ?)",
-            (message_id, text, depth, _now()),
+            (message_id, text, depth, created_at or _now()),
         )
         return cur.lastrowid
 

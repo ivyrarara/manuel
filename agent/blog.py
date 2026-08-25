@@ -9,15 +9,17 @@
 다른 매거진에 쓴 글도 전부 잡힙니다. 그게 싫으면 fetch()에 제목 필터를 넣으세요.
 """
 import asyncio
+import calendar
 import json
 import logging
 import re
+from datetime import datetime, timezone
 
 import feedparser
 import httpx
 
 from . import brain, db
-from .config import BACKGROUND, BLOG_MAGAZINE_SLUG, BLOG_RSS_URL
+from .config import BACKGROUND, BLOG_MAGAZINE_SLUG, BLOG_RSS_URL, TZ
 
 log = logging.getLogger("maneul.blog")
 
@@ -31,6 +33,20 @@ def enabled() -> bool:
 def _parse_feed(url: str):
     """feedparser는 동기 함수라 스레드로 돌립니다. 봇 전체가 멈추면 안 되니까요."""
     return feedparser.parse(url, agent="Mozilla/5.0 (maneul-agent)")
+
+
+def _entry_local_time(entry) -> str | None:
+    """RSS 항목의 발행 시각을 로컬 TZ 타임스탬프로. 없으면 None(호출부가 _now()로 대체).
+
+    feedparser는 published_parsed/updated_parsed를 항상 UTC로 정규화한 time.struct_time으로
+    줍니다(문서화된 동작). 이걸로 발행 성취를 "동기화가 도는 시각"이 아니라 실제 발행 시각으로
+    기록합니다 — 안 그러면 주 경계 근처에 쓴 글이 다음 주 성취로 새어버릴 수 있습니다.
+    """
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not parsed:
+        return None
+    epoch = calendar.timegm(parsed)
+    return db.format_ts(datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(TZ))
 
 
 async def check() -> dict:
@@ -88,6 +104,7 @@ async def check() -> dict:
         db.add_blog_post(guid, title, link, entry.get("published", ""), content, is_magazine)
         new_posts.append({
             "title": title, "link": link, "content": content, "is_magazine": is_magazine,
+            "published_at": _entry_local_time(entry),
         })
 
     return {"ok": True, "error": None, "total": len(feed.entries), "new": new_posts}
@@ -112,7 +129,9 @@ async def sync(record: bool = True) -> dict:
     # 매거진 글만 성취입니다. 일상·기분 글은 읽되 세지 않습니다.
     recorded = [p for p in result["new"] if p["is_magazine"]]
     for post in recorded:
-        db.add_achievement(f"블로그 발행: {post['title']}", depth=6)
+        db.add_achievement(
+            f"블로그 발행: {post['title']}", depth=6, created_at=post.get("published_at")
+        )
 
     skipped = len(result["new"]) - len(recorded)
     log.info("새 글 %d개 중 %d개를 6단 성취로 기록 (매거진 외 %d개는 읽기만)",
